@@ -1,9 +1,11 @@
 import AppKit
 
-/// Launch-at-login through `SMAppService` when available, falling back to a LaunchAgent plist.
+/// The login item, written as a LaunchAgent plist.
 ///
-/// `SMAppService` needs a real signed bundle in /Applications; the LaunchAgent path keeps the
-/// option working when the app runs from a build directory.
+/// The trade-off is visibility: `SMAppService` would list the app in System Settings → Login
+/// Items, where the user can see and revoke it, while a plist in `~/Library/LaunchAgents` is
+/// invisible there and can be deleted or left behind by a reinstall. Because of that second half,
+/// the stored preference and the plist are reconciled on every launch — see `sync()`.
 enum LaunchAtLogin {
 
     private static var label: String { "pl.milosz.notesmini.launch" }
@@ -15,6 +17,18 @@ enum LaunchAtLogin {
 
     static func set(enabled: Bool) {
         if enabled { install() } else { remove() }
+    }
+
+    /// Brings the login item in line with the stored preference.
+    ///
+    /// The preference is the source of truth: the plist can be deleted by the user or survive a
+    /// reinstall pointing at an old build, and neither is visible from the Preferences checkbox.
+    /// Reconciling on launch also means the plist always points at the copy that is actually
+    /// running, which is the copy the user means.
+    static func sync() {
+        let wanted = Prefs.launchAtLogin
+        if wanted && !isEnabled { install() }
+        if !wanted && isEnabled { remove() }
     }
 
     static var isEnabled: Bool {

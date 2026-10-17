@@ -31,6 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setUpStatusItem()
         registerHotkey()
+        // The login item is derived state: never trust a plist left over from another copy.
+        LaunchAtLogin.sync()
 
         // Open with the last note the user had; if that file is gone, fall back to the most
         // recently updated note rather than silently creating an empty one next to it.
