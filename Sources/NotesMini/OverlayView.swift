@@ -103,7 +103,7 @@ final class OverlayView: NSView, NSTextFieldDelegate {
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
+        applyBackground()
 
         field.isBordered = false
         field.drawsBackground = false
@@ -166,6 +166,24 @@ final class OverlayView: NSView, NSTextFieldDelegate {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// The overlay works as a surface of its own.
+    ///
+    /// The card underneath is deliberately translucent — that is what makes it frosted rather than
+    /// flat — but it is also why the note was reading through the list: the editor text and the
+    /// character count sat behind a 0.90 tint and came out as legible ghosts. A subview cannot blur
+    /// what is behind it, so the only honest answer is to be opaque, using the card's own colour so
+    /// the two surfaces stay the same material. The card's `masksToBounds` rounds the bottom of it
+    /// off for us.
+    private func applyBackground() {
+        layer?.backgroundColor = CardBackgroundView.tintColor(for: effectiveAppearance)
+            .withAlphaComponent(1).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyBackground()
+    }
 
     // MARK: presenting
 

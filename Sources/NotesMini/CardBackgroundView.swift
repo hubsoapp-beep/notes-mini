@@ -59,6 +59,18 @@ final class CardBackgroundView: NSView {
         effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     }
 
+    /// The translucent tint the card is drawn with.
+    ///
+    /// Shared with the note list and the action panel, which sit on top of the card and draw their
+    /// own surface with it. Kept in one place so the two never drift apart into slightly different
+    /// greys, and resolved against the appearance at the moment of use rather than captured once.
+    ///
+    /// Slightly translucent so the blur still reads as a frosted surface, not a flat panel.
+    static func tintColor(for appearance: NSAppearance) -> NSColor {
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return NSColor.windowBackgroundColor.withAlphaComponent(isDark ? 0.86 : 0.90)
+    }
+
     private func applyShape() {
         let radius = cornerRadius
         layer?.cornerRadius = radius
@@ -68,8 +80,7 @@ final class CardBackgroundView: NSView {
         tint.layer?.cornerRadius = radius
         tint.layer?.cornerCurve = .continuous
         tint.layer?.masksToBounds = true
-        // Slightly translucent so the blur still reads as a frosted surface, not a flat panel.
-        tint.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(isDark ? 0.86 : 0.90).cgColor
+        tint.layer?.backgroundColor = Self.tintColor(for: effectiveAppearance).cgColor
         tint.layer?.borderWidth = 0.75
         tint.layer?.borderColor = (isDark ? NSColor(white: 1, alpha: 0.09) : NSColor(white: 0, alpha: 0.06)).cgColor
 
