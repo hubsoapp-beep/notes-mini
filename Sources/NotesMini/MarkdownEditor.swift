@@ -11,6 +11,10 @@ final class MarkdownEditor: NSTextView {
     /// Escape hides the panel — the same gesture that closes Raycast's window.
     var onEscape: (() -> Void)?
 
+    /// Keys the emoji picker owns while it is open. Asked before anything else, so the arrows move
+    /// the grid and Return picks from it instead of editing the note. Returns true when consumed.
+    var onEmojiKey: ((NSEvent) -> Bool)?
+
     static func make() -> MarkdownEditor {
         let storage = NSTextStorage()
         let layout = DecorationLayoutManager()
@@ -56,6 +60,7 @@ final class MarkdownEditor: NSTextView {
             super.keyDown(with: event)
             return
         }
+        if onEmojiKey?(event) == true { return }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         switch event.keyCode {
         case 53: // Escape

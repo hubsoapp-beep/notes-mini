@@ -28,6 +28,15 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
     var onEscape: (() -> Void)?
     var onFocusLost: (() -> Void)?
 
+    /// Lazily built: most sessions never type `:`, and a second window is not free.
+    private var emojiPicker: EmojiPickerPanel?
+
+    /// The trigger the user closed with Escape. Dismissing a window hands focus back, and AppKit
+    /// answers that with a selection notification — without remembering the dismissal, Escape would
+    /// close the grid and it would be back a run-loop tick later. Cleared as soon as the trigger
+    /// changes or the caret leaves its line, so nothing is permanently switched off.
+    private var dismissedTrigger: String?
+
     // MARK: setup
 
     init() {
@@ -39,6 +48,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         editor.host = self
         editor.delegate = self
         editor.onEscape = { [weak self] in self?.onEscape?() }
+        editor.onEmojiKey = { [weak self] event in self?.handleEmojiKey(event) ?? false }
 
         scrollView.documentView = editor
         scrollView.hasVerticalScroller = true
@@ -77,6 +87,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         self.note = note
         undoStack.removeAll()
         redoStack.removeAll()
+        emojiPicker?.dismiss()
         render = NoteRenderer.render(note.body, theme: Prefs.theme)
         let caret = caretAtEnd ? (note.body as NSString).length : 0
         applyRender(caretRaw: caret, length: 0)
@@ -121,6 +132,13 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         commitDisplayChange()
     }
 
+    /// Moving the caret can open or close the picker: leaving the `:` line must dismiss it, and
+    /// clicking back onto one must bring it up again.
+    func textViewDidChangeSelection(_ notification: Notification) {
+        guard !isApplying else { return }
+        refreshEmojiPicker()
+    }
+
     private func commitDisplayChange() {
         guard let note else { return }
         let newDisplay = editor.string
@@ -139,6 +157,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         render = NoteRenderer.render(newRaw, theme: Prefs.theme)
         applyRender(caretRaw: caretRaw, length: 0)
         onContentChange?(note)
+        refreshEmojiPicker()
     }
 
     /// One replaced range between two strings: the shared prefix and suffix are trimmed away.
@@ -212,6 +231,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         render = NoteRenderer.render(newRaw, theme: Prefs.theme)
         applyRender(caretRaw: caretRaw, length: length)
         onContentChange?(note)
+        refreshEmojiPicker()
     }
 
     private func toggleInline(_ marker: String) {
@@ -389,6 +409,11 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         NSPasteboard.general.setString(Exporter.plainText(note.body), forType: .string)
     }
 
+    /// Closes the picker if it is open. Called when the panel goes away.
+    func dismissEmojiPicker() {
+        emojiPicker?.dismiss()
+    }
+
     /// Not every action belongs in the menu bar; this catches the leftovers.
     func handleKeyEquivalent(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -423,6 +448,89 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         }
         if let action = byChars[key] { action(); return true }
         return false
+    }
+
+    // MARK: emoji picker
+
+    /// The picker is open for a trailing `:` at the end of a line. The query is whatever follows
+    /// that colon, taken straight from the raw markdown — see `EmojiTrigger`.
+    private var emojiQuery: String? {
+        guard let note else { return nil }
+        return EmojiTrigger.query(in: note.body, caret: selectionAnchorRaw())
+    }
+
+    /// Shows, updates or hides the picker so it always matches the caret's line.
+    private func refreshEmojiPicker() {
+        guard let query = emojiQuery, let window else {
+            emojiPicker?.dismiss()
+            // Off the trigger line: the next colon starts fresh.
+            dismissedTrigger = nil
+            return
+        }
+        let trigger = ":" + query
+        guard dismissedTrigger != trigger else {
+            emojiPicker?.dismiss()
+            return
+        }
+        dismissedTrigger = nil
+        let panel = ensureEmojiPicker()
+        panel.picker.show(query: query)
+        panel.present(anchor: caretScreenRect(), in: window)
+    }
+
+    private func ensureEmojiPicker() -> EmojiPickerPanel {
+        if let emojiPicker { return emojiPicker }
+        let panel = EmojiPickerPanel()
+        panel.picker.onPick = { [weak self] emoji in
+            self?.emojiPicker?.dismiss()
+            self?.insertEmoji(emoji)
+        }
+        emojiPicker = panel
+        return panel
+    }
+
+    /// Keys the picker owns while it is open: the arrows walk the grid, Return and Tab take the
+    /// highlighted emoji, Escape closes the grid and leaves the panel (and the colon) alone.
+    /// Left and right are deliberately *not* swallowed — moving the caret out of the trigger line
+    /// is a legitimate way to abandon the picker.
+    private func handleEmojiKey(_ event: NSEvent) -> Bool {
+        guard let panel = emojiPicker, panel.isVisible else { return false }
+        switch event.keyCode {
+        case 53: // Escape
+            dismissedTrigger = emojiQuery.map { ":" + $0 }
+            panel.dismiss()
+            return true
+        case 126: // Arrow up
+            panel.picker.moveSelection(dx: 0, dy: -1)
+            return true
+        case 125: // Arrow down
+            panel.picker.moveSelection(dx: 0, dy: 1)
+            return true
+        case 36, 76, 48: // Return, keypad Enter, Tab
+            panel.picker.pickCurrent()
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Replaces the colon and the query typed after it with the chosen emoji.
+    func insertEmoji(_ emoji: String) {
+        guard let note,
+              let result = EmojiTrigger.insert(emoji, in: note.body, caret: selectionAnchorRaw()) else { return }
+        applyReplace(result.raw, caretRaw: result.caret)
+    }
+
+    /// Where the caret is on screen, which is where the picker hangs from.
+    private func caretScreenRect() -> NSRect {
+        let display = editor.selectedRange().location
+        let rect = editor.firstRect(forCharacterRange: NSRange(location: display, length: 0), actualRange: nil)
+        guard rect.height > 0 else {
+            // Should not happen for a laid-out text view, but a zero rect would drop the picker in
+            // the screen corner, so fall back to the panel itself.
+            return window?.frame ?? .zero
+        }
+        return rect
     }
 
     /// True when the caret sits on an empty line, used to decide whether a slash opens a menu.

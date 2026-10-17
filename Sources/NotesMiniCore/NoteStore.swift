@@ -314,10 +314,6 @@ public final class NoteStore {
     }
 
     public static func fold(_ s: String) -> String {
-        let transliterated = s.replacingOccurrences(of: "ł", with: "l")
-            .replacingOccurrences(of: "Ł", with: "L")
-            .replacingOccurrences(of: "đ", with: "d")
-            .replacingOccurrences(of: "ø", with: "o")
-        return transliterated.folding(options: [.diacriticInsensitive, .caseInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US"))
+        TextFold.fold(s)
     }
 }

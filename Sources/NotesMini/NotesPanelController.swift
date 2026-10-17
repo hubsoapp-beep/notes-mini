@@ -107,6 +107,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
     func hide() {
         guard panel.isVisible else { return }
+        editorView.dismissEmojiPicker()
         store.flushAll()
         panel.orderOut(nil)
     }

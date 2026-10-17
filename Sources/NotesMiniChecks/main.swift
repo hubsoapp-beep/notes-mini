@@ -475,6 +475,73 @@ func testEditorCommands() {
     eq(EditorCommands.InputRule.changeIndent(raw: "plain", caret: 2, increase: true), "plain", "tab does nothing outside blocks")
 }
 
+// MARK: - emoji picker
+
+func testEmoji() {
+    let all = EmojiCatalog.all
+    check(all.count >= 150, "emoji catalogue is a real list (\(all.count) entries)")
+
+    var seen = Set<String>()
+    var duplicates: [String] = []
+    for emoji in all where !seen.insert(emoji.char).inserted {
+        duplicates.append(emoji.char)
+    }
+    check(duplicates.isEmpty, "no emoji appears twice in the catalogue (found \(duplicates.joined()))")
+
+    let malformed = all.filter { $0.char.count != 1 }
+    check(malformed.isEmpty, "every entry is exactly one grapheme (found \(malformed.map(\.char).joined()))")
+
+    // Search compares the query against the stored keywords, so the two must agree on folding.
+    let unfolded = all.filter { $0.keywords != TextFold.fold($0.keywords) }
+    check(unfolded.isEmpty, "keywords are stored folded, just like the query that looks for them")
+
+    eq(EmojiCatalog.search("").count, EmojiCatalog.pageSize, "an empty query fills exactly one page")
+
+    eq(EmojiCatalog.search("serce").first?.char, "❤️", "serce finds the red heart first")
+    eq(EmojiCatalog.search("serc").first?.char, "❤️", "a partial word still finds the red heart")
+    eq(EmojiCatalog.search("serce czarne").first?.char, "🖤", "two words narrow it to the black heart")
+    eq(EmojiCatalog.search("uśmiech").first?.char, "😀", "uśmiech finds the grinning face")
+    eq(EmojiCatalog.search("usmiech").first?.char, EmojiCatalog.search("uśmiech").first?.char,
+       "the same query without diacritics picks the same emoji")
+    eq(EmojiCatalog.search("kawa").first?.char, "☕", "kawa finds the coffee")
+    eq(EmojiCatalog.search("kot").first?.char, "🐱", "kot finds the cat rather than a grinning cat face")
+    eq(EmojiCatalog.search("laptop").first?.char, "💻", "laptop finds the laptop")
+    eq(EmojiCatalog.search("zadne-takie-slowo").count, 0, "a query that matches nothing returns nothing")
+    eq(EmojiCatalog.search("serce", limit: 3).count, 3, "the page limit is honoured")
+    eq(EmojiCatalog.search("serce").map(\.char), EmojiCatalog.search("serce").map(\.char),
+       "search is deterministic across calls")
+}
+
+// MARK: - emoji trigger
+
+func testEmojiTrigger() {
+    eq(EmojiTrigger.query(in: ":", caret: 1), "", "a bare colon is a trigger with an empty query")
+    eq(EmojiTrigger.query(in: ":ser", caret: 4), "ser", "the query is what follows the colon")
+    eq(EmojiTrigger.query(in: "notatka\n:kot", caret: 12), "kot", "a colon on any line triggers")
+
+    check(EmojiTrigger.query(in: ": ser", caret: 5) == nil, "a colon followed by a space is prose")
+    check(EmojiTrigger.query(in: "::x", caret: 3) == nil, "a double colon is prose")
+    check(EmojiTrigger.query(in: "tekst: ser", caret: 6) == nil, "a colon mid-line is prose")
+    check(EmojiTrigger.query(in: ":ser", caret: 2) == nil, "a caret inside the query does not trigger")
+    check(EmojiTrigger.query(in: "", caret: 0) == nil, "an empty note has no trigger")
+    check(EmojiTrigger.query(in: "abc", caret: 3) == nil, "plain text has no trigger")
+    check(EmojiTrigger.query(in: "x", caret: 99) == nil, "a caret past the end has no trigger")
+
+    let trigger = EmojiTrigger.range(in: ":ser", caret: 4)
+    eq(trigger?.location, 0, "the trigger range starts at the colon")
+    eq(trigger?.length, 4, "the trigger range covers the colon and the query typed after it")
+
+    let inserted = EmojiTrigger.insert("❤️", in: ":ser", caret: 4)
+    eq(inserted?.raw, "❤️", "picking replaces the whole trigger, not only the colon")
+    eq(inserted?.caret, 2, "the caret lands behind the two-unit heart")
+
+    let scoped = EmojiTrigger.insert("😀", in: "notatka\n:ser", caret: 12)
+    eq(scoped?.raw, "notatka\n😀", "only the trigger line is touched")
+    eq(scoped?.caret, 10, "the caret keeps its place relative to the line start")
+
+    check(EmojiTrigger.insert("😀", in: "bez triggera", caret: 4) == nil, "nothing happens without a trigger")
+}
+
 // MARK: - run
 
 if CommandLine.arguments.contains("debug") {
@@ -494,6 +561,8 @@ testRenderer()
 testStore()
 testExport()
 testEditorCommands()
+testEmoji()
+testEmojiTrigger()
 
 let elapsed = Date().timeIntervalSince(started)
 if failures.isEmpty {
