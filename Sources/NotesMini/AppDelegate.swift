@@ -110,8 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         panel.presentOverlay(items: items,
                              placeholder: "Szukaj notatek…",
-                             emptyText: notes.isEmpty ? "Brak notatek" : "Nic nie znaleziono",
-                             height: max(220, panel.panel.frame.height))
+                             emptyText: notes.isEmpty ? "Brak notatek" : "Nic nie znaleziono")
     }
 
     @objc func showActionPanel(_ sender: Any?) {
@@ -161,8 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         panel.presentOverlay(items: items,
                              placeholder: "Wpisz akcję…",
-                             emptyText: "Brak pasujących akcji",
-                             height: max(300, panel.panel.frame.height))
+                             emptyText: "Brak pasujących akcji")
     }
 
     @objc func togglePin(_ sender: Any?) {
@@ -357,6 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fileMenu = NSMenu(title: "Notatka")
         fileMenu.addItem(menuItem("Nowa notatka", #selector(newNote(_:)), "n", target: self))
         fileMenu.addItem(menuItem("Przeglądaj notatki…", #selector(browseNotes(_:)), "p", target: self))
+        fileMenu.addItem(menuItem("Akcje…", #selector(showActionPanel(_:)), "k", target: self))
         fileMenu.addItem(menuItem("Przypnij / odepnij", #selector(togglePin(_:)), "P", target: self))
         fileMenu.addItem(.separator())
         fileMenu.addItem(menuItem("Zapisz jako Markdown…", #selector(exportMarkdown(_:)), "S", target: self))

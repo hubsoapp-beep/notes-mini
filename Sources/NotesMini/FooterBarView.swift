@@ -57,6 +57,9 @@ final class FooterBarView: NSView {
             separator.leadingAnchor.constraint(equalTo: leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor),
             separator.topAnchor.constraint(equalTo: topAnchor),
+            // Same unconstrained-box problem as the header: pinned to one edge only, it settles at
+            // its default thickness and drifts outside the bar.
+            separator.heightAnchor.constraint(equalToConstant: 1),
         ])
     }
 

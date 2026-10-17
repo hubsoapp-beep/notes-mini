@@ -10,13 +10,17 @@ enum WindowLevel {
     static let overlay = NSWindow.Level(rawValue: 102)
 }
 
-/// Borderless, non-activating panel that floats above everything, on every Space.
+/// Floating panel with a real title bar: traffic lights in the corner, resizable edges, and the
+/// card drawn through the whole window because the title bar itself is transparent.
 final class FloatingPanel: NSPanel {
 
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
-            styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
+            // `.titled` is what brings the three traffic lights and edge resizing; the title bar is
+            // made transparent below so the card still fills the window and the buttons simply sit
+            // on top of it. `.nonactivatingPanel` keeps typing from pulling the app forward.
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -38,6 +42,13 @@ final class FloatingPanel: NSPanel {
         isReleasedWhenClosed = false
         // No title bar chrome, but keep the standard behaviours that matter for typing.
         isRestorable = false
+
+        // The title bar is only a home for the buttons; the window's own title is never shown.
+        titleVisibility = .hidden
+        titlebarAppearsTransparent = true
+        titlebarSeparatorStyle = .none
+        title = ""
+        standardWindowButton(.zoomButton)?.isEnabled = true
     }
 
     /// The panel must be able to take keyboard focus without activating the app, so typing in

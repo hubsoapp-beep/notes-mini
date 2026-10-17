@@ -80,6 +80,14 @@ final class OverlayRowView: NSView {
     }
 }
 
+/// Document view for the note list.
+///
+/// Flipped, so the rows start at the top: a non-flipped document view is measured from the bottom,
+/// and with a panel taller than the list the rows floated at the bottom with empty space above.
+final class ListContainer: NSView {
+    override var isFlipped: Bool { true }
+}
+
 /// Searchable list used for both ⌘P (browse notes) and ⌘K (actions).
 /// The search field keeps focus; arrow keys and Return are forwarded here.
 final class OverlayView: NSView, NSTextFieldDelegate {
@@ -89,6 +97,7 @@ final class OverlayView: NSView, NSTextFieldDelegate {
     private let field = NSTextField()
     private let scroll = NSScrollView()
     private let list = NSStackView()
+    private let listContainer = ListContainer()
     private let empty = NSTextField(labelWithString: "")
 
     private var allItems: [OverlayItem] = []
@@ -123,7 +132,10 @@ final class OverlayView: NSView, NSTextFieldDelegate {
         list.translatesAutoresizingMaskIntoConstraints = false
         list.edgeInsets = NSEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
 
-        scroll.documentView = list
+        listContainer.translatesAutoresizingMaskIntoConstraints = false
+        listContainer.addSubview(list)
+
+        scroll.documentView = listContainer
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -150,15 +162,21 @@ final class OverlayView: NSView, NSTextFieldDelegate {
             separator.leadingAnchor.constraint(equalTo: leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor),
             separator.topAnchor.constraint(equalTo: field.bottomAnchor, constant: 11),
+            // The rule needs its own height: without it the separator and the list below are two
+            // unknowns sharing one equation, and Auto Layout is entitled to hand the separator the
+            // whole panel — which it did, drawing it as a 555pt vertical line through the middle.
+            separator.heightAnchor.constraint(equalToConstant: 1),
 
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.topAnchor.constraint(equalTo: separator.bottomAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            list.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            list.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
-            list.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            list.leadingAnchor.constraint(equalTo: listContainer.leadingAnchor),
+            list.trailingAnchor.constraint(equalTo: listContainer.trailingAnchor),
+            list.topAnchor.constraint(equalTo: listContainer.topAnchor),
+            list.bottomAnchor.constraint(equalTo: listContainer.bottomAnchor),
+            listContainer.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
 
             empty.centerXAnchor.constraint(equalTo: centerXAnchor),
             empty.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 26),

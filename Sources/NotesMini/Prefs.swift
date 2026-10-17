@@ -14,6 +14,7 @@ enum Prefs {
         static let hotkey = "hotkey"
         static let panelFrame = "panelFrame"
         static let launchAtLogin = "launchAtLogin"
+        static let autoHeight = "autoHeight"
     }
 
     static var notesFolder: URL? {
@@ -49,6 +50,16 @@ enum Prefs {
     static var launchAtLogin: Bool {
         get { defaults.bool(forKey: Key.launchAtLogin) }
         set { defaults.set(newValue, forKey: Key.launchAtLogin) }
+    }
+
+    /// Whether the panel height follows the note.
+    ///
+    /// Turned off the first time the window is resized by hand: from then on the size the person
+    /// chose is the size they get, and the note scrolls inside it instead of dragging the window
+    /// back to its own height.
+    static var autoHeight: Bool {
+        get { defaults.object(forKey: Key.autoHeight) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.autoHeight) }
     }
 
     static var panelFrame: NSRect? {

@@ -32,6 +32,16 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     /// Pending write of the window frame. See `scheduleFrameSave()`.
     private var frameSaveWork: DispatchWorkItem?
 
+    /// Required size for the content view. See the note in `init`.
+    private var contentWidth: NSLayoutConstraint!
+    private var contentHeight: NSLayoutConstraint!
+
+    /// Whether the panel height follows the note. See `Prefs.autoHeight`.
+    private var autoHeight = Prefs.autoHeight
+
+    /// Frame to come back to after the green button fills the screen; `nil` when not expanded.
+    private var expandedFrom: NSRect?
+
     init(store: NoteStore) {
         self.store = store
         panel = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: defaultWidth, height: 260))
@@ -46,6 +56,18 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
             card.topAnchor.constraint(equalTo: content.topAnchor),
             card.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
+
+        // Auto Layout is a single engine for the whole window, and when nothing pins the window's
+        // size the engine is free to satisfy the content instead: the note list's rows want a width
+        // of their own, and AppKit answered that by narrowing the whole window (430 became 188 the
+        // moment the list appeared). A required constant on the content view leaves the rows nothing
+        // to negotiate with — they compress — so the window keeps the size it was given. The constant
+        // is refreshed wherever that size changes.
+        contentWidth = content.widthAnchor.constraint(equalToConstant: defaultWidth)
+        contentHeight = content.heightAnchor.constraint(equalToConstant: 260)
+        contentWidth.priority = .required
+        contentHeight.priority = .required
+        NSLayoutConstraint.activate([contentWidth, contentHeight])
 
         header.translatesAutoresizingMaskIntoConstraints = false
         editorView.translatesAutoresizingMaskIntoConstraints = false
@@ -72,6 +94,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
         panel.contentView = content
         panel.delegate = self
+        panel.contentMinSize = NSSize(width: minWidth, height: minHeight)
         // Dragging is handled by the header, not by the window background: the card, the editor
         // and the footer cover every point of the panel, so there is no background left to grab.
         panel.isMovableByWindowBackground = false
@@ -79,7 +102,10 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         header.onNewNote = { [weak self] in self?.onRequestNewNote?() }
         header.onBrowse = { [weak self] in self?.onRequestBrowse?() }
         header.onActions = { [weak self] in self?.onRequestActionPanel?() }
+        header.onDoubleClick = { [weak self] in self?.toggleAutoHeight() }
         footer.onFormat = { [weak self] in self?.onRequestActionPanel?() }
+
+        configureTrafficLights()
 
         editorView.onEscape = { [weak self] in self?.hide() }
         editorView.onContentChange = { [weak self] note in
@@ -100,6 +126,8 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         panel.appearance = Prefs.nsAppearance
         dismissOverlay()
         activateNotesMini()
+        // A panel put away in the Dock has to come back from it, not just be ordered front.
+        if panel.isMiniaturized { panel.deminiaturize(nil) }
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         if focus { editorView.focus() }
@@ -116,6 +144,57 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         store.flushAll()
         saveFrameNow()
         panel.orderOut(nil)
+    }
+
+    // MARK: window chrome
+
+    /// The three lights mean what they mean for this panel, not what they would mean for a document.
+    private func configureTrafficLights() {
+        let close = panel.standardWindowButton(.closeButton)
+        close?.target = self
+        close?.action = #selector(closeTapped)
+
+        let miniaturize = panel.standardWindowButton(.miniaturizeButton)
+        miniaturize?.target = self
+        miniaturize?.action = #selector(miniaturizeTapped)
+
+        let zoom = panel.standardWindowButton(.zoomButton)
+        zoom?.target = self
+        zoom?.action = #selector(zoomTapped)
+        zoom?.toolTip = "Powiększ do pełnego ekranu"
+    }
+
+    /// Red: the panel goes away, the app keeps running in the menu bar.
+    @objc private func closeTapped() { hide() }
+
+    /// Yellow: to the Dock. `show()` brings it back from there.
+    @objc func miniaturizeTapped() { panel.miniaturize(nil) }
+
+    /// Green: fill the screen instead of entering full-screen mode. A panel that exists to stay on
+    /// top of every other window has no business moving to a Space of its own, where it would be
+    /// alone with nothing to be on top of.
+    @objc func zoomTapped() {
+        if let previous = expandedFrom {
+            expandedFrom = nil
+            restore(previous)
+            return
+        }
+        guard let screen = panel.screen ?? NSScreen.main else { return }
+        expandedFrom = panel.frame
+        restore(screen.visibleFrame.insetBy(dx: 16, dy: 16))
+    }
+
+    private func restore(_ frame: NSRect) {
+        panel.setFrame(frame, display: true)
+        syncContentSize(to: frame.size)
+        scheduleFrameSave()
+    }
+
+    /// Double-clicking the header puts the height back in the note's hands, or takes it back out.
+    private func toggleAutoHeight() {
+        autoHeight.toggle()
+        Prefs.autoHeight = autoHeight
+        if autoHeight { resizeToFitContent() }
     }
 
     func toggle(_ note: Note) {
@@ -138,7 +217,11 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
     var isOverlayVisible: Bool { !overlay.isHidden }
 
-    func presentOverlay(items: [OverlayItem], placeholder: String, emptyText: String, height: CGFloat = 0) {
+    /// Shows the list over the note.
+    ///
+    /// It fills whatever size the panel already has: opening a list is a change of mode, not a
+    /// change of window, and resizing here is what made the panel jump every time the list opened.
+    func presentOverlay(items: [OverlayItem], placeholder: String, emptyText: String) {
         if overlay.superview == nil {
             overlay.translatesAutoresizingMaskIntoConstraints = false
             card.addSubview(overlay)
@@ -151,12 +234,6 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
             overlay.onClose = { [weak self] in self?.dismissOverlay() }
         }
         overlay.isHidden = false
-        if height > 0 {
-            var frame = panel.frame
-            frame.origin.y += frame.height - height
-            frame.size.height = height
-            panel.setFrame(frame, display: true)
-        }
         overlay.present(items: items, placeholder: placeholder, emptyText: emptyText)
     }
 
@@ -169,7 +246,18 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
     // MARK: geometry
 
+    /// Mirrors the window's size into the required content constraints.
+    ///
+    /// They exist to stop the engine from sizing the window from its contents, so they have to
+    /// follow every deliberate size change: the restore at show, the auto-fit resize, and a resize
+    /// the user drags.
+    private func syncContentSize(to size: NSSize) {
+        contentWidth.constant = size.width
+        contentHeight.constant = size.height
+    }
+
     private func restoreFrameIfNeeded() {
+        expandedFrom = nil
         if let saved = Prefs.panelFrame {
             panel.setFrame(saved, display: false)
         } else {
@@ -202,11 +290,15 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         frame.origin.x = min(max(full.minX - frame.width + keepVisible, frame.origin.x), full.maxX - keepVisible)
         frame.origin.y = min(max(full.minY - frame.height + keepVisible, frame.origin.y), full.maxY - keepVisible)
         panel.setFrame(frame, display: false)
+        syncContentSize(to: frame.size)
     }
 
     /// Grows and shrinks with the note, keeping the top edge where it is.
+    ///
+    /// Only while the height is still the note's to decide: after a manual resize the size the
+    /// person chose wins, and a longer note scrolls instead of pushing the window around.
     private func resizeToFitContent() {
-        guard panel.isVisible else { return }
+        guard panel.isVisible, autoHeight, expandedFrom == nil else { return }
         panel.layoutIfNeeded()
         let desired = editorView.usedContentHeight + headerHeight + footerHeight
         let target = min(max(desired.rounded(.up), minHeight), maxHeight)
@@ -215,6 +307,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         frame.origin.y += frame.height - target
         frame.size.height = target
         panel.setFrame(frame, display: true, animate: false)
+        syncContentSize(to: frame.size)
     }
 
     // MARK: NSWindowDelegate
@@ -234,6 +327,25 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         scheduleFrameSave()
     }
 
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        // The required content constraints have to travel with a drag, otherwise the engine holds
+        // the window at the size they still describe.
+        let clamped = NSSize(width: max(minWidth, frameSize.width),
+                             height: max(minHeight, frameSize.height))
+        syncContentSize(to: clamped)
+        return clamped
+    }
+
+    /// A finished drag is a decision: this is the size from now on.
+    func windowDidEndLiveResize(_ notification: Notification) {
+        expandedFrom = nil
+        if autoHeight {
+            autoHeight = false
+            Prefs.autoHeight = false
+        }
+        scheduleFrameSave()
+    }
+
     /// Remembers where the panel is, once it has stopped moving.
     ///
     /// A drag fires `windowDidMove` on every mouse-moved event and `resizeToFitContent` fires
@@ -243,7 +355,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         frameSaveWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            Prefs.panelFrame = panel.frame
+            Prefs.panelFrame = frameToRemember
         }
         frameSaveWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
@@ -257,6 +369,10 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     func saveFrameNow() {
         frameSaveWork?.cancel()
         frameSaveWork = nil
-        Prefs.panelFrame = panel.frame
+        Prefs.panelFrame = frameToRemember
     }
+
+    /// The frame worth remembering. Filling the screen from the green button is temporary, so the
+    /// size to reopen with is the one the panel was expanded from.
+    private var frameToRemember: NSRect { expandedFrom ?? panel.frame }
 }

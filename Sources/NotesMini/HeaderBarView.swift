@@ -6,6 +6,7 @@ final class HeaderBarView: NSView {
     var onNewNote: (() -> Void)?
     var onBrowse: (() -> Void)?
     var onActions: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
 
     var title: String = "" {
         didSet { titleLabel.stringValue = title }
@@ -46,7 +47,9 @@ final class HeaderBarView: NSView {
         NSLayoutConstraint.activate([
             titleLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 14),
+            // The traffic lights sit at the left end of this strip, so the title has to start to
+            // their right: sharing the corner with them would put text under the buttons.
+            titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 78),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: buttons.leadingAnchor, constant: -8),
 
             buttons.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
@@ -55,6 +58,9 @@ final class HeaderBarView: NSView {
             separator.leadingAnchor.constraint(equalTo: leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor),
             separator.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // A separator with no height of its own is an unconstrained box: it settles at 5pt and
+            // is drawn slightly outside the bar.
+            separator.heightAnchor.constraint(equalToConstant: 1),
         ])
     }
 
@@ -78,6 +84,12 @@ final class HeaderBarView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // Double-click hands the height back to the note, or takes it back out. With a real title
+        // bar this gesture would zoom the window; here the panel has its own meaning for it.
+        if event.clickCount == 2 {
+            onDoubleClick?()
+            return
+        }
         // `performDrag` runs its own tracking loop, so no `mouseDragged` handling is needed here.
         window?.performDrag(with: event)
     }
