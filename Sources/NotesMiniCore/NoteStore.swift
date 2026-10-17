@@ -24,6 +24,9 @@ public final class NoteStore {
 
     private var watcher: DispatchSourceFileSystemObject?
     private var watchedFD: CInt = -1
+    /// Notes with a save in flight, keyed by URL. Only these are written by `flushAll()`: a note
+    /// the user never touched must stay byte-identical on disk, frontmatter and all.
+    private var pendingNotes: [URL: Note] = [:]
     private var pendingSaves: [URL: DispatchWorkItem] = [:]
     private let saveDelay: DispatchTimeInterval = .milliseconds(450)
     private let queue = DispatchQueue(label: "notesmini.store", qos: .utility)
@@ -31,8 +34,11 @@ public final class NoteStore {
     private var suppressUntil: [URL: Date] = [:]
 
     public init(folder: URL) {
-        self.folder = folder
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // Standardised so that a note's URL compares equal however the path was spelled: on macOS
+        // `/var` and `/private/var` are the same directory but different strings, and the store
+        // compares URLs to find notes.
+        self.folder = folder.resolvingSymlinksInPath()
+        try? FileManager.default.createDirectory(at: self.folder, withIntermediateDirectories: true)
     }
 
     // MARK: loading
@@ -170,6 +176,7 @@ public final class NoteStore {
 
     public func scheduleSave(_ note: Note) {
         let url = note.url
+        pendingNotes[url] = note
         pendingSaves[url]?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -180,35 +187,58 @@ public final class NoteStore {
     }
 
     public func flush(_ note: Note) {
-        pendingSaves[note.url]?.cancel()
-        pendingSaves[note.url] = nil
+        clearPending(note)
         writeNow(note)
     }
 
+    /// Writes only the notes that are actually waiting to be saved.
     public func flushAll() {
-        for note in notes { flush(note) }
+        for note in pendingNotes.values { flush(note) }
+    }
+
+    public var hasPendingSaves: Bool { !pendingNotes.isEmpty }
+
+    /// Drops the pending entries for one note. Keyed by URL normally, but a note that gets renamed
+    /// while a write is in flight would otherwise leave an unreachable entry behind, so match on
+    /// the instance as well.
+    private func clearPending(_ note: Note) {
+        pendingSaves[note.url]?.cancel()
+        pendingNotes = pendingNotes.filter { $0.value !== note }
+        pendingSaves = pendingSaves.filter { note.url != $0.key }
     }
 
     public func writeNow(_ note: Note) {
+        let fm = FileManager.default
+
         note.meta.updated = Date()
         if note.meta.created == nil { note.meta.created = note.meta.updated }
-        let desired = uniqueURL(slug: Slug.make(note.title), excluding: note.url)
-        let currentName = note.url.lastPathComponent
-        let desiredName = desired.lastPathComponent
-        let fm = FileManager.default
-        if desiredName != currentName && Slug.make(note.title) != "note" {
-            do {
-                if fm.fileExists(atPath: note.url.path) { try fm.moveItem(at: note.url, to: desired) }
+        let data = Data(note.fileContents().utf8)
+        clearPending(note)
+
+        // Writing a file whose contents would not change is pure noise: it bumps the modification
+        // date, wakes the watcher and makes the note jump to the top of a "recently updated" list.
+        if let existing = try? Data(contentsOf: note.url), existing == data {
+            return
+        }
+
+        // The filename follows the title, so a note stays findable by name in Finder or Obsidian.
+        // A note with no title yet keeps its placeholder name rather than becoming `note.md`.
+        let stem = note.url.deletingPathExtension().lastPathComponent
+        let slug = Slug.make(note.title)
+        if !slug.isEmpty, slug != "note", slug != stem {
+            let desired = uniqueURL(slug: slug, excluding: note.url)
+            if desired.lastPathComponent != note.url.lastPathComponent,
+               fm.fileExists(atPath: note.url.path),
+               (try? fm.moveItem(at: note.url, to: desired)) != nil {
                 note.move(to: desired)
                 suppressUntil[desired] = Date().addingTimeInterval(1.5)
-            } catch {
-                // keep old name on failure
             }
         }
-        let data = Data(note.fileContents().utf8)
+
         do {
             try data.write(to: note.url, options: .atomic)
             suppressUntil[note.url] = Date().addingTimeInterval(1.2)
+            pendingNotes[note.url] = nil
             notes = sorted(notes)
             onChange?()
         } catch {

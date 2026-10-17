@@ -52,7 +52,12 @@ func testFrontmatter() {
 
     let note = Note(url: URL(fileURLWithPath: "/tmp/a.md"), meta: fm, body: body)
     let (fm2, body2) = Frontmatter.parse(note.fileContents())
-    eq(fm2.title, fm.title, "frontmatter roundtrip title")
+    // `title` is carried by the first body line, so it must round-trip through the note, not
+    // through the frontmatter — writing it in both places duplicated it inside the file.
+    eq(note.title, "Spotkanie z Petrem", "title round-trips through the body")
+    check(fm2.title == nil, "body title is not duplicated into frontmatter")
+    eq(note.fileContents().components(separatedBy: "# Spotkanie z Petrem").count - 1, 1,
+       "title appears exactly once in the file")
     eq(fm2.pinned, fm.pinned, "frontmatter roundtrip pinned")
     eq(body2, body, "frontmatter roundtrip body")
 
@@ -175,6 +180,28 @@ func testRenderer() {
     eq(empty.rawLength, 0, "empty raw length")
     eq(empty.rawOffsetForCaret(0), 0, "empty caret mapping")
 
+    // Polish counts take three forms, and 12–14 is the irregular range.
+    eq(CountText.characters(1), "1 znak", "singular count")
+    eq(CountText.characters(3), "3 znaki", "few count")
+    eq(CountText.characters(13), "13 znaków", "teens take the plural form")
+    eq(CountText.characters(22), "22 znaki", "22 takes the few form")
+    eq(CountText.characters(21), "21 znaków", "21 takes the plural form")
+    eq(CountText.characters(101), "101 znaków", "101 takes the plural form")
+    eq(CountText.characters(0), "0 znaków", "zero count")
+
+    // A finished task is dimmed so the outstanding ones stand out.
+    let tasks = NoteRenderer.render("- [x] zrobione\n- [ ] otwarte\n")
+    var checkedIsDim = false
+    var openIsDim = false
+    tasks.display.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: tasks.display.length)) { value, range, _ in
+        guard let color = value as? NSColor else { return }
+        let text = (tasks.display.string as NSString).substring(with: range)
+        if text.contains("zrobione") { checkedIsDim = color == NSColor.secondaryLabelColor }
+        if text.contains("otwarte") { openIsDim = color == NSColor.secondaryLabelColor }
+    }
+    check(checkedIsDim, "a checked task is dimmed")
+    check(!openIsDim, "an open task keeps the body colour")
+
     let uni = NoteRenderer.render("# Zażółć gęślą jaźń 😀\n\ntekst: ąćęłńóśźż\n")
     check(uni.display.string.contains("Zażółć gęślą jaźń 😀"), "emoji + polish headline")
     check(uni.display.string.contains("ąćęłńóśźż"), "polish body")
@@ -182,6 +209,27 @@ func testRenderer() {
     let deco = NoteRenderer.render("text `code`\n\n> quoted\n\n```\nblock\n```\n")
     check(deco.decorations.contains { $0.kind == .inlineCode }, "inline code decoration")
     check(deco.decorations.contains { $0.kind == .codeBlock }, "code block decoration")
+    // The `>` marker is hidden, so the rule that makes a quote readable has to be a decoration.
+    let quoteBar = deco.decorations.first { $0.kind == .quoteBar }
+    check(quoteBar != nil, "quote bar decoration")
+    if let quoteBar {
+        eq((deco.display.string as NSString).substring(with: quoteBar.range), "quoted", "quote bar covers the quote text")
+    }
+
+    // A fenced block must keep exactly one display line per source line. The fences own a line
+    // break but no text, so a bug that emits the break twice inserts a blank line between every
+    // pair of code lines — which reads as double-spaced code.
+    let fenced = "before\n\n```swift\nlet a = 1\nlet b = 2\n```\n\nafter\n"
+    let fencedOut = NoteRenderer.render(fenced)
+    check(fencedOut.display.string.contains("let a = 1\nlet b = 2"),
+          "code lines are not separated by blank lines")
+    eq(fencedOut.display.string.components(separatedBy: "\n").count,
+       fenced.components(separatedBy: "\n").count, "code block keeps the line count")
+
+    // A genuinely blank line inside a block is still preserved.
+    let fencedGap = NoteRenderer.render("```\na\n\nb\n```\n")
+    check(fencedGap.display.string.contains("a\n\nb"), "a blank code line survives")
+    eq(fencedGap.display.string.components(separatedBy: "\n").count, 6, "blank code line keeps the count")
 
     let endRaw = "# Title\n"
     let er = NoteRenderer.render(endRaw)
@@ -289,6 +337,70 @@ func testStore() {
     check(!FileManager.default.fileExists(atPath: firstURL.path), "old file gone")
     check(FileManager.default.fileExists(atPath: renamed.url.path), "new file exists")
     eq(s5.notes.count, 1, "still one note")
+
+    func fileText(_ url: URL) -> String {
+        (try? Data(contentsOf: url)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    }
+
+    // Looking at a note must not change the file. This was a real bug: hiding the panel called
+    // flushAll(), which rewrote and renamed every note in the folder.
+    let folder6 = tempFolder()
+    defer { try? FileManager.default.removeItem(at: folder6) }
+    let importedURL = folder6.appendingPathComponent("moja-notatka.md")
+    let importedText = "# Moja notatka\n\nTekst z **pogrubieniem**.\n"
+    try? importedText.write(to: importedURL, atomically: true, encoding: .utf8)
+    let s6 = NoteStore(folder: folder6)
+    s6.reload()
+    s6.flushAll()
+    eq(fileText(importedURL), importedText, "an untouched note stays byte-identical")
+    eq(s6.notes.count, 1, "untouched note still listed")
+
+    // Editing it writes frontmatter — but never a `title` that repeats the first body line.
+    s6.notes[0].body = "# Moja notatka\n\nTekst z **pogrubieniem**.\n\nNowy akapit.\n"
+    s6.flush(s6.notes[0])
+    let rewritten = fileText(importedURL)
+    check(rewritten.hasPrefix("---\n"), "an edited note gains frontmatter")
+    check(!rewritten.contains("title:"), "frontmatter does not duplicate the body title")
+    eq(s6.notes[0].url.lastPathComponent, "moja-notatka.md", "filename already matches the title")
+    eq(s6.notes[0].title, "Moja notatka", "title still read from the body")
+    eq(s6.notes[0].body, "# Moja notatka\n\nTekst z **pogrubieniem**.\n\nNowy akapit.\n", "body round-trips")
+
+    // A retitled note moves to the matching filename, and leaves nothing behind.
+    let before = s6.notes[0].url
+    s6.notes[0].body = "# Inny tytuł\n\ntreść\n"
+    s6.flush(s6.notes[0])
+    eq(s6.notes[0].url.lastPathComponent, "inny-tytul.md", "filename follows the new title")
+    check(!FileManager.default.fileExists(atPath: before.path), "old filename is gone")
+    check(fileText(s6.notes[0].url).contains("treść"), "renamed file holds the content")
+
+    // A title that lives only in frontmatter must survive a rewrite.
+    let folder7 = tempFolder()
+    defer { try? FileManager.default.removeItem(at: folder7) }
+    let fmOnly = folder7.appendingPathComponent("tylko-frontmatter.md")
+    try? "---\ntitle: Tylko z frontmatter\n---\n".write(to: fmOnly, atomically: true, encoding: .utf8)
+    let s7 = NoteStore(folder: folder7)
+    s7.reload()
+    eq(s7.notes[0].title, "Tylko z frontmatter", "title falls back to frontmatter")
+    s7.flush(s7.notes[0])
+    check(fileText(s7.notes[0].url).contains("title: Tylko z frontmatter"),
+          "frontmatter-only title survives a rewrite")
+
+    // flushAll writes the notes with pending edits, and only those.
+    let folder8 = tempFolder()
+    defer { try? FileManager.default.removeItem(at: folder8) }
+    let bystanderURL = folder8.appendingPathComponent("obok.md")
+    let bystanderText = "# Obok\n\n- jedno\n"
+    try? bystanderText.write(to: bystanderURL, atomically: true, encoding: .utf8)
+    let s8 = NoteStore(folder: folder8)
+    s8.reload()
+    let edited = s8.createNote(title: "Zmieniona", body: "# Zmieniona\n\ntreść\n")
+    edited.body = "# Zmieniona\n\ninna treść\n"
+    s8.scheduleSave(edited)
+    check(s8.hasPendingSaves, "pending save registered")
+    s8.flushAll()
+    check(fileText(edited.url).contains("inna treść"), "flushAll writes the pending note")
+    check(!s8.hasPendingSaves, "pending save cleared")
+    eq(fileText(bystanderURL), bystanderText, "flushAll leaves the other notes alone")
 }
 
 // MARK: - Export

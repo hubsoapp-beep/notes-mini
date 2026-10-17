@@ -159,7 +159,16 @@ public final class Note {
     public var body: String
 
     /// First line of the body, stripped of markdown heading markers — Raycast's note title.
+    /// Falls back to the frontmatter `title` for notes whose body has no usable first line
+    /// (for example a file that only ever carried frontmatter).
     public var title: String {
+        let fromBody = bodyTitle
+        if !fromBody.isEmpty { return fromBody }
+        return meta.title?.trimmingCharacters(in: .whitespaces) ?? ""
+    }
+
+    /// The title as derived from the body alone.
+    private var bodyTitle: String {
         let first = body.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? ""
         var t = first.trimmingCharacters(in: .whitespaces)
         while t.hasPrefix("#") { t.removeFirst() }
@@ -192,7 +201,10 @@ public final class Note {
     /// Full file contents (frontmatter + body).
     public func fileContents() -> String {
         var fm = meta
-        fm.title = title.isEmpty ? nil : title
+        // `title` mirrors the body's first line, so writing it as well would duplicate it inside
+        // the file — and the two copies would then drift apart as the first line is edited.
+        // Frontmatter only carries a title for notes whose body has no usable first line.
+        fm.title = bodyTitle.isEmpty ? fm.title : nil
         return (fm.serialize() ?? "") + body
     }
 

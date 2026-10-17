@@ -27,9 +27,11 @@ public struct RenderTheme: Equatable {
                                                   dark: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.09)) }
     public var inlineCodeBackground: NSColor { RenderTheme.color(light: NSColor(srgbRed: 0.91, green: 0.91, blue: 0.93, alpha: 1),
                                                         dark: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.13)) }
-    public var quoteBarColor: NSColor { .quaternaryLabelColor }
+    public var quoteBarColor: NSColor { RenderTheme.color(light: NSColor(srgbRed: 0.76, green: 0.76, blue: 0.79, alpha: 1),
+                                                          dark: NSColor(srgbRed: 0.44, green: 0.44, blue: 0.48, alpha: 1)) }
 
     public var baseFont: NSFont { .systemFont(ofSize: fontSize) }
+    public var titleFont: NSFont { .systemFont(ofSize: fontSize * 1.5, weight: .semibold) }
     public var monoFont: NSFont { .monospacedSystemFont(ofSize: fontSize - 1, weight: .regular) }
     public var monoBoldFont: NSFont { .monospacedSystemFont(ofSize: fontSize - 1, weight: .semibold) }
 
@@ -177,8 +179,16 @@ public enum NoteRenderer {
             b.beginBlock()
             switch block.kind {
             case .heading(let level): b.emitHeading(block, level: level)
-            case .paragraph: b.emitInlines(block.inlines, base: b.bodyAttrs)
-            case .blockquote: b.emitInlines(block.inlines, base: b.quoteAttrs)
+            case .paragraph: b.emitInlines(block.inlines, base: infos.isEmpty ? b.titleAttrs : b.bodyAttrs)
+            case .blockquote:
+                b.emitInlines(block.inlines, base: b.quoteAttrs)
+                // The `>` marker is hidden like every other marker, so the rule that makes a quote
+                // readable has to be painted separately — nothing in the text expresses it.
+                if b.displayLength > b.blockStart {
+                    b.decorations.append(Decoration(
+                        kind: .quoteBar,
+                        range: NSRange(location: b.blockStart, length: b.displayLength - b.blockStart)))
+                }
             case .listItem(let item): b.emitListItem(block, item: item)
             case .codeBlock: b.emitCodeBlock(block)
             case .thematicBreak: b.emitHorizontalRule(block)
@@ -236,6 +246,7 @@ public enum NoteRenderer {
         /// Immutable, shared per-document styles: identical instances let the text storage
         /// coalesce attribute runs instead of treating every paragraph as a new one.
         let bodyAttrs: [NSAttributedString.Key: Any]
+        let titleAttrs: [NSAttributedString.Key: Any]
         let quoteAttrs: [NSAttributedString.Key: Any]
         let codeAttrs: [NSAttributedString.Key: Any]
         private var headingStyles: [Int: NSParagraphStyle] = [:]
@@ -251,6 +262,10 @@ public enum NoteRenderer {
             body.lineSpacing = max(1, theme.fontSize * 0.22)
             body.paragraphSpacing = max(2, theme.fontSize * 0.28)
 
+            let title = NSMutableParagraphStyle()
+            title.lineSpacing = max(1, theme.fontSize * 0.12)
+            title.paragraphSpacing = theme.fontSize * 0.28
+
             let quote = NSMutableParagraphStyle()
             quote.lineSpacing = max(1, theme.fontSize * 0.22)
             quote.paragraphSpacing = max(2, theme.fontSize * 0.2)
@@ -263,6 +278,8 @@ public enum NoteRenderer {
 
             self.bodyAttrs = [.font: theme.baseFont, .foregroundColor: theme.textColor,
                               .paragraphStyle: body.copy() as! NSParagraphStyle]
+            self.titleAttrs = [.font: theme.titleFont, .foregroundColor: theme.textColor,
+                               .paragraphStyle: title.copy() as! NSParagraphStyle]
             self.quoteAttrs = [.font: theme.baseFont, .foregroundColor: theme.secondaryColor,
                                .paragraphStyle: quote.copy() as! NSParagraphStyle]
             self.codeAttrs = [.font: theme.monoFont, .foregroundColor: theme.textColor,
@@ -380,20 +397,31 @@ public enum NoteRenderer {
             }
             let attrs = codeAttrs
             var prevEnd = block.contentRange.lowerBound
+            // The rounded slab is drawn around the code itself, not around the hidden fence
+            // lines: including them made the top padding a whole line taller than the bottom.
+            var slabStart = -1
+            var slabEnd = -1
             for (text, range) in block.codeLines {
                 if range.lowerBound > prevEnd {
                     for i in prevEnd..<min(range.lowerBound, rawLength) where ns.character(at: i) == 0x0A {
                         appendNewline(rawOffset: i)
                     }
                 }
-                if text.isEmpty {
-                    appendNewline(rawOffset: min(range.lowerBound, max(0, rawLength - 1)))
-                } else {
+                if !text.isEmpty {
+                    if slabStart < 0 { slabStart = out.length }
                     append(text, rawStart: range.lowerBound, rawLen: range.count, attrs: attrs)
+                    slabEnd = out.length
                 }
                 prevEnd = range.upperBound
                 if prevEnd < rawLength, ns.character(at: prevEnd) == 0x0A {
+                    // The line's own break. A blank code line is nothing but this break, so it
+                    // must not be emitted a second time — that is what double-spaced code looked
+                    // like, one blank display line after every real one.
                     appendNewline(rawOffset: prevEnd)
+                    prevEnd += 1
+                } else if text.isEmpty, range.upperBound == range.lowerBound {
+                    // A blank last line with no break of its own.
+                    appendNewline(rawOffset: min(range.lowerBound, max(0, rawLength - 1)))
                 }
             }
             // closing fence: no visible characters, its line break is emitted by finishBlock
@@ -401,7 +429,10 @@ public enum NoteRenderer {
                 skip(prevEnd..<block.rawRange.upperBound)
             }
             endContent()
-            decorations.append(Decoration(kind: .codeBlock, range: NSRange(location: blockStart, length: blockContentEnd - blockStart)))
+            if slabStart >= 0, slabEnd > slabStart {
+                decorations.append(Decoration(kind: .codeBlock,
+                                              range: NSRange(location: slabStart, length: slabEnd - slabStart)))
+            }
         }
 
         func emitHorizontalRule(_ block: Block) {
@@ -413,13 +444,17 @@ public enum NoteRenderer {
         func emitListItem(_ block: Block, item: ListItem) {
             skip(block.rawRange.lowerBound..<block.contentRange.lowerBound)
             let style = listStyle(item)
-            var prefixAttrs: [NSAttributedString.Key: Any] = [.font: theme.baseFont, .foregroundColor: theme.secondaryColor, .paragraphStyle: style]
+            let prefixAttrs: [NSAttributedString.Key: Any] = [.font: theme.baseFont, .foregroundColor: theme.secondaryColor, .paragraphStyle: style]
             var contentAttrs = bodyAttrs
             contentAttrs[.paragraphStyle] = style
+            // Raycast fades a completed task so the remaining ones stand out at a glance.
+            if item.task == .checked {
+                contentAttrs[.foregroundColor] = theme.secondaryColor
+            }
 
             if let task = item.task {
                 let att = NSTextAttachment()
-                att.image = CheckboxImages.image(checked: task == .checked, size: theme.fontSize, dark: theme.isDark)
+                att.image = CheckboxImages.image(checked: task == .checked, size: theme.fontSize)
                 att.bounds = CGRect(x: 0, y: -1.5, width: theme.fontSize, height: theme.fontSize)
                 appendAttachment(att, rawOffset: block.taskMarkerRange?.lowerBound ?? block.contentRange.lowerBound)
                 append(" ", rawStart: block.contentRange.lowerBound, rawLen: 1, attrs: prefixAttrs)
@@ -519,8 +554,8 @@ public enum NoteRenderer {
 public enum CheckboxImages {
     private static var cache: [String: NSImage] = [:] // main-thread only (UI)
 
-    public static func image(checked: Bool, size: CGFloat, dark: Bool) -> NSImage {
-        let key = "\(checked)-\(Int(size))-\(dark)"
+    public static func image(checked: Bool, size: CGFloat) -> NSImage {
+        let key = "\(checked)-\(Int(size))"
         if let c = cache[key] { return c }
         let s = max(12, size)
         let img = NSImage(size: CGSize(width: s, height: s), flipped: false) { _ in
@@ -538,8 +573,10 @@ public enum CheckboxImages {
                 p.line(to: NSPoint(x: s * 0.73, y: s * 0.68))
                 p.stroke()
             } else {
-                (dark ? NSColor.white.withAlphaComponent(0.5) : NSColor.black.withAlphaComponent(0.32)).setStroke()
-                box.lineWidth = 1.1
+                // Raycast outlines an open task in the accent colour, which is what makes the
+                // checkbox read as clickable rather than as a piece of punctuation.
+                NSColor.controlAccentColor.setStroke()
+                box.lineWidth = 1.4
                 box.stroke()
             }
             return true
