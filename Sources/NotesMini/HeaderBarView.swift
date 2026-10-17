@@ -60,6 +60,28 @@ final class HeaderBarView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
+    // MARK: dragging the panel
+
+    /// The header doubles as the window's drag handle.
+    ///
+    /// The panel cannot be moved by its background, because the card, the editor and the footer
+    /// cover every point of it, and the editor has to keep its own mouse handling for caret
+    /// placement and selection. The header is the one strip that is pure chrome, so it is where a
+    /// drag belongs — the same place a title bar would be.
+    ///
+    /// `hitTest` is what makes that work. The title label sits in the middle of the strip, and a
+    /// text field would otherwise swallow the click before it ever reached `mouseDown`; reporting
+    /// the header for everything that is not a button turns the whole strip into one surface.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        return hit.isInsideButton ? hit : self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // `performDrag` runs its own tracking loop, so no `mouseDragged` handling is needed here.
+        window?.performDrag(with: event)
+    }
+
     private func makeButton(_ symbol: String, tooltip: String, action: Selector) -> NSButton {
         let button = NSButton()
         button.isBordered = false
@@ -81,4 +103,19 @@ final class HeaderBarView: NSView {
     @objc private func newTapped() { onNewNote?() }
     @objc private func browseTapped() { onBrowse?() }
     @objc private func actionsTapped() { onActions?() }
+}
+
+private extension NSView {
+    /// True when this view, or anything above it, is a button.
+    ///
+    /// Used to tell "the user pressed a header button" apart from "the user grabbed the strip" —
+    /// a button's own subviews must not be mistaken for the drag surface.
+    var isInsideButton: Bool {
+        var current: NSView? = self
+        while let view = current {
+            if view is NSButton { return true }
+            current = view.superview
+        }
+        return false
+    }
 }

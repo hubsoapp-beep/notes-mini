@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        panel?.saveFrameNow()
         store?.flushAll()
         HotkeyCenter.shared.unregister()
     }

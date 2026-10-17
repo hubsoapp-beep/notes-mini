@@ -29,6 +29,9 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     private let headerHeight: CGFloat = 38
     private let footerHeight: CGFloat = 24
 
+    /// Pending write of the window frame. See `scheduleFrameSave()`.
+    private var frameSaveWork: DispatchWorkItem?
+
     init(store: NoteStore) {
         self.store = store
         panel = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: defaultWidth, height: 260))
@@ -69,6 +72,8 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
         panel.contentView = content
         panel.delegate = self
+        // Dragging is handled by the header, not by the window background: the card, the editor
+        // and the footer cover every point of the panel, so there is no background left to grab.
         panel.isMovableByWindowBackground = false
 
         header.onNewNote = { [weak self] in self?.onRequestNewNote?() }
@@ -109,6 +114,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         guard panel.isVisible else { return }
         editorView.dismissEmojiPicker()
         store.flushAll()
+        saveFrameNow()
         panel.orderOut(nil)
     }
 
@@ -221,12 +227,36 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
-        guard panel.isVisible else { return }
-        Prefs.panelFrame = panel.frame
+        scheduleFrameSave()
     }
 
     func windowDidResize(_ notification: Notification) {
-        guard panel.isVisible else { return }
+        scheduleFrameSave()
+    }
+
+    /// Remembers where the panel is, once it has stopped moving.
+    ///
+    /// A drag fires `windowDidMove` on every mouse-moved event and `resizeToFitContent` fires
+    /// `windowDidResize` several times per keystroke; writing to `UserDefaults` for each of those
+    /// is a lot of pointless I/O in the middle of the one interaction that has to stay smooth.
+    private func scheduleFrameSave() {
+        frameSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            Prefs.panelFrame = panel.frame
+        }
+        frameSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    /// Writes a pending frame without waiting.
+    ///
+    /// The panel is flushed when it is put away and when the app quits, so a drag followed straight
+    /// by Escape or ⌘Q is not lost — hiding does not move the window, so the frame is still the one
+    /// the user just chose.
+    func saveFrameNow() {
+        frameSaveWork?.cancel()
+        frameSaveWork = nil
         Prefs.panelFrame = panel.frame
     }
 }
