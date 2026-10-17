@@ -15,6 +15,10 @@ final class EmojiPickerView: NSView {
     private var selection = 0
     private var hovered: Int?
 
+    /// Distance from the caret's left edge to the grid's left edge. Not related to the grid's own
+    /// padding — it is about where the card should sit relative to the line being typed.
+    static let caretOffset: CGFloat = 12
+
     private let columns = 8
     private let cell: CGFloat = 32
     private let sideInset: CGFloat = 12
@@ -190,7 +194,9 @@ final class EmojiPickerPanel: NSPanel {
             host = parent
         }
         let size = picker.contentSize
-        var origin = NSPoint(x: anchor.minX - sideInset, y: anchor.minY - 6 - size.height)
+        // Hangs slightly to the left of the caret so the grid reads as belonging to the line
+        // rather than to whatever happens to sit under the caret's first column.
+        var origin = NSPoint(x: anchor.minX - EmojiPickerView.caretOffset, y: anchor.minY - 6 - size.height)
         if let visible = (parent.screen ?? NSScreen.main)?.visibleFrame {
             origin.x = min(max(visible.minX + 4, origin.x), visible.maxX - size.width - 4)
             if origin.y < visible.minY + 4 {
@@ -208,6 +214,4 @@ final class EmojiPickerPanel: NSPanel {
         host = nil
         orderOut(nil)
     }
-
-    private var sideInset: CGFloat { 12 }
 }
