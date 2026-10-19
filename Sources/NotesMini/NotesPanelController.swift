@@ -1,6 +1,19 @@
 import AppKit
 import NotesMiniCore
 
+/// The window's content view.
+///
+/// It reports its current size as its fitting size, which is the one thing that stops AppKit from
+/// resizing the window to fit its contents. Auto Layout is a single engine for the whole window, and
+/// with nothing pinning the window the engine was free to satisfy the note list's preferred width by
+/// narrowing the window — 430 collapsed to 188 the moment the list opened. Pinning the size with
+/// required constraints fixed that but made the window impossible to drag: every live resize was
+/// answered by an engine that still held the old number. Reporting the size we already have leaves
+/// nothing to negotiate and nothing to fight, so the edges drag like any other window.
+final class PanelContentView: NSView {
+    override var fittingSize: NSSize { bounds.size }
+}
+
 /// The floating notes window: a rounded card with a small header and the editor underneath.
 ///
 /// It is summoned with the global hotkey, hides on Escape or when it loses focus, and keeps its
@@ -32,10 +45,6 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     /// Pending write of the window frame. See `scheduleFrameSave()`.
     private var frameSaveWork: DispatchWorkItem?
 
-    /// Required size for the content view. See the note in `init`.
-    private var contentWidth: NSLayoutConstraint!
-    private var contentHeight: NSLayoutConstraint!
-
     /// Whether the panel height follows the note. See `Prefs.autoHeight`.
     private var autoHeight = Prefs.autoHeight
 
@@ -48,7 +57,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         super.init()
 
         card.translatesAutoresizingMaskIntoConstraints = false
-        let content = NSView()
+        let content = PanelContentView()
         content.addSubview(card)
         NSLayoutConstraint.activate([
             card.leadingAnchor.constraint(equalTo: content.leadingAnchor),
@@ -56,18 +65,6 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
             card.topAnchor.constraint(equalTo: content.topAnchor),
             card.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
-
-        // Auto Layout is a single engine for the whole window, and when nothing pins the window's
-        // size the engine is free to satisfy the content instead: the note list's rows want a width
-        // of their own, and AppKit answered that by narrowing the whole window (430 became 188 the
-        // moment the list appeared). A required constant on the content view leaves the rows nothing
-        // to negotiate with — they compress — so the window keeps the size it was given. The constant
-        // is refreshed wherever that size changes.
-        contentWidth = content.widthAnchor.constraint(equalToConstant: defaultWidth)
-        contentHeight = content.heightAnchor.constraint(equalToConstant: 260)
-        contentWidth.priority = .required
-        contentHeight.priority = .required
-        NSLayoutConstraint.activate([contentWidth, contentHeight])
 
         header.translatesAutoresizingMaskIntoConstraints = false
         editorView.translatesAutoresizingMaskIntoConstraints = false
@@ -186,7 +183,6 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
     private func restore(_ frame: NSRect) {
         panel.setFrame(frame, display: true)
-        syncContentSize(to: frame.size)
         scheduleFrameSave()
     }
 
@@ -246,16 +242,6 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
     // MARK: geometry
 
-    /// Mirrors the window's size into the required content constraints.
-    ///
-    /// They exist to stop the engine from sizing the window from its contents, so they have to
-    /// follow every deliberate size change: the restore at show, the auto-fit resize, and a resize
-    /// the user drags.
-    private func syncContentSize(to size: NSSize) {
-        contentWidth.constant = size.width
-        contentHeight.constant = size.height
-    }
-
     private func restoreFrameIfNeeded() {
         expandedFrom = nil
         if let saved = Prefs.panelFrame {
@@ -290,7 +276,6 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         frame.origin.x = min(max(full.minX - frame.width + keepVisible, frame.origin.x), full.maxX - keepVisible)
         frame.origin.y = min(max(full.minY - frame.height + keepVisible, frame.origin.y), full.maxY - keepVisible)
         panel.setFrame(frame, display: false)
-        syncContentSize(to: frame.size)
     }
 
     /// Grows and shrinks with the note, keeping the top edge where it is.
@@ -307,7 +292,6 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         frame.origin.y += frame.height - target
         frame.size.height = target
         panel.setFrame(frame, display: true, animate: false)
-        syncContentSize(to: frame.size)
     }
 
     // MARK: NSWindowDelegate
@@ -325,15 +309,6 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
     func windowDidResize(_ notification: Notification) {
         scheduleFrameSave()
-    }
-
-    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
-        // The required content constraints have to travel with a drag, otherwise the engine holds
-        // the window at the size they still describe.
-        let clamped = NSSize(width: max(minWidth, frameSize.width),
-                             height: max(minHeight, frameSize.height))
-        syncContentSize(to: clamped)
-        return clamped
     }
 
     /// A finished drag is a decision: this is the size from now on.
