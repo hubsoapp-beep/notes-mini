@@ -51,6 +51,10 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     /// Frame to come back to after the green button fills the screen; `nil` when not expanded.
     private var expandedFrom: NSRect?
 
+    /// True while the panel is being moved by this controller, so `windowDidMove` can tell its own
+    /// frame changes apart from the person dragging the window.
+    private var adjustingFrame = false
+
     init(store: NoteStore) {
         self.store = store
         panel = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: defaultWidth, height: 260))
@@ -104,7 +108,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
         configureTrafficLights()
 
-        editorView.onEscape = { [weak self] in self?.hide() }
+        editorView.onEscape = { [weak self] in self?.escapePressed() }
         editorView.onContentChange = { [weak self] note in
             self?.header.title = note.uiTitle
             self?.footer.characterCount = note.body.count
@@ -167,23 +171,48 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     /// Yellow: to the Dock. `show()` brings it back from there.
     @objc func miniaturizeTapped() { panel.miniaturize(nil) }
 
-    /// Green: fill the screen instead of entering full-screen mode. A panel that exists to stay on
-    /// top of every other window has no business moving to a Space of its own, where it would be
-    /// alone with nothing to be on top of.
+    /// Green: the whole screen, edge to edge, with the traffic lights out of the way. A panel that
+    /// exists to stay on top of every other window has no business moving to a full-screen Space of
+    /// its own, where it would be alone with nothing to be on top of — so this fills the screen it is
+    /// already on, over the menu bar and the Dock, and leaves the panel level alone.
     @objc func zoomTapped() {
-        if let previous = expandedFrom {
-            expandedFrom = nil
-            restore(previous)
-            return
-        }
-        guard let screen = panel.screen ?? NSScreen.main else { return }
-        expandedFrom = panel.frame
-        restore(screen.visibleFrame.insetBy(dx: 16, dy: 16))
+        if expandedFrom != nil { leaveFullScreen() } else { enterFullScreen() }
     }
 
-    private func restore(_ frame: NSRect) {
-        panel.setFrame(frame, display: true)
+    private func enterFullScreen() {
+        guard let screen = panel.screen ?? NSScreen.main else { return }
+        expandedFrom = panel.frame
+        setTrafficLightsHidden(true)
+        // Corner to corner there is no window edge to round off; rounded corners here would show the
+        // desktop through them, which is exactly what full screen is supposed to hide.
+        card.cornerRadius = 0
+        adjustingFrame = true
+        panel.setFrame(screen.frame, display: true)
+        adjustingFrame = false
         scheduleFrameSave()
+    }
+
+    private func leaveFullScreen() {
+        guard let previous = expandedFrom else { return }
+        expandedFrom = nil
+        setTrafficLightsHidden(false)
+        card.cornerRadius = CardBackgroundView.defaultCornerRadius
+        adjustingFrame = true
+        panel.setFrame(previous, display: true)
+        adjustingFrame = false
+        scheduleFrameSave()
+    }
+
+    /// Esc leaves the full screen before it hides the panel: the panel is still on screen, so the
+    /// smaller step is the one that matches what the person is looking at.
+    private func escapePressed() {
+        if expandedFrom != nil { leaveFullScreen() } else { hide() }
+    }
+
+    private func setTrafficLightsHidden(_ hidden: Bool) {
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(kind)?.isHidden = hidden
+        }
     }
 
     /// Double-clicking the header puts the height back in the note's hands, or takes it back out.
@@ -244,6 +273,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
     private func restoreFrameIfNeeded() {
         expandedFrom = nil
+        setTrafficLightsHidden(false)
         if let saved = Prefs.panelFrame {
             panel.setFrame(saved, display: false)
         } else {
@@ -304,6 +334,12 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
+        // Dragging a full-screen panel is a way out of full screen: the person has taken the window
+        // somewhere, so the chrome comes back and the window stays where they dropped it.
+        if expandedFrom != nil, !adjustingFrame {
+            expandedFrom = nil
+            setTrafficLightsHidden(false)
+        }
         scheduleFrameSave()
     }
 
@@ -314,6 +350,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     /// A finished drag is a decision: this is the size from now on.
     func windowDidEndLiveResize(_ notification: Notification) {
         expandedFrom = nil
+        setTrafficLightsHidden(false)
         if autoHeight {
             autoHeight = false
             Prefs.autoHeight = false

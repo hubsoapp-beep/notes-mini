@@ -18,7 +18,10 @@ final class CardBackgroundView: NSView {
     private let topSheen = CAGradientLayer()
     private let bottomShade = CAGradientLayer()
 
-    var cornerRadius: CGFloat = 17 {
+    /// The radius the card is drawn with when it is a window rather than the whole screen.
+    static let defaultCornerRadius: CGFloat = 17
+
+    var cornerRadius: CGFloat = CardBackgroundView.defaultCornerRadius {
         didSet { applyShape() }
     }
 

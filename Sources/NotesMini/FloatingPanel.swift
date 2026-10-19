@@ -55,4 +55,12 @@ final class FloatingPanel: NSPanel {
     /// the editor never yanks the user out of the full-screen app underneath.
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    /// The panel is allowed to sit over the menu bar — that is the whole point of its window level —
+    /// so AppKit's habit of keeping a title bar clear of the menu bar is exactly what stops the green
+    /// button from covering the screen. Staying on the display is still enforced, by the controller's
+    /// own clamp, which keeps a corner of the panel reachable.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
 }

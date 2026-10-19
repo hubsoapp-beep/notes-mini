@@ -163,6 +163,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                              emptyText: "Brak pasujących akcji")
     }
 
+    /// Full screen from the menu as well as the green button; hiding the traffic lights leaves the
+    /// keyboard as the way back, so the shortcut has to exist.
+    @objc func togglePanelFullScreen(_ sender: Any?) {
+        panel?.zoomTapped()
+    }
+
     @objc func togglePin(_ sender: Any?) {
         guard let note = currentNote else { return }
         store.togglePinned(note)
@@ -409,6 +415,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenu.addItem(menuItem("Większa czcionka", #selector(zoomIn(_:)), "+", target: self))
         viewMenu.addItem(menuItem("Mniejsza czcionka", #selector(zoomOut(_:)), "-", target: self))
         viewMenu.addItem(menuItem("Domyślny rozmiar", #selector(zoomReset(_:)), "0", target: self))
+        viewMenu.addItem(.separator())
+        let fullScreen = NSMenuItem(title: "Pełny ekran", action: #selector(togglePanelFullScreen(_:)),
+                                    keyEquivalent: "f", modifiers: [.command, .control])
+        fullScreen.target = self
+        viewMenu.addItem(fullScreen)
         viewItem.submenu = viewMenu
         main.addItem(viewItem)
 
