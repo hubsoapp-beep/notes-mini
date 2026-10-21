@@ -14,6 +14,10 @@ assembles the `.app`.
 - **Markdown that stays out of the way.** Bold, italic, underline, strike-through, inline code,
   links, three heading levels, bulleted, numbered and task lists, quotes, code blocks, rules,
   checkboxes — with the markup hidden while you type over it. The file on disk is ordinary Markdown.
+  Heading shortcuts wait for a space: `##` stays visible, then `## ` activates H2. At the start
+  of a line, `[]`, `[ ]`, `- []`, and `- [ ]` become checkboxes as soon as `]` is typed.
+  Return continues a list at the caret, a second Return leaves an empty item, and Backspace
+  at the start of formatted content removes its block format. Inline shortcuts stay literal in code blocks.
 - **Notes are files.** One `.md` per note, YAML frontmatter, named after the title. Open the folder
   in Obsidian, grep it, sync it with whatever you already use.
 - **A command palette** (`⌘P`) to search and switch notes, and an action list (`⌘K`) for everything
@@ -37,8 +41,8 @@ Scripts/build.sh            # assembles ./dist/Notes Mini.app
 Scripts/build.sh --install  # also copies it to /Applications and launches it
 ```
 
-The app is an accessory app: no Dock icon, no window at launch. It lives in the menu bar and on the
-global hotkey, `⌥N` by default.
+The app is an accessory app with no Dock icon. Launching or reopening it shows the notes panel.
+It also lives in the menu bar and on the global hotkey, `⌥N` by default.
 
 ## Checks
 
@@ -46,8 +50,9 @@ Command Line Tools ships neither XCTest nor swift-testing, so the regression sui
 executable target:
 
 ```sh
-swift run NotesMiniChecks            # 192 checks
+swift run NotesMiniChecks
 swift run -c release NotesMiniChecks
+bash Scripts/check-editor.sh release # real NSTextView input, undo, IME, and layout checks
 ```
 
 It covers the note model and file format, the Markdown parser and the renderer's raw/display

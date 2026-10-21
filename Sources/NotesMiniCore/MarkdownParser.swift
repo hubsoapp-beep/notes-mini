@@ -156,6 +156,8 @@ public enum MarkdownParser {
             let range = idx.range(ofLine: i)
             let line = ns.substring(with: range)
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            let leadingWidth = line.prefix { $0 == " " || $0 == "\t" }.utf16.count
+            let unindented = ns.substring(with: (range.lowerBound + leadingWidth)..<range.upperBound)
 
             if trimmed.isEmpty { i += 1; continue }
 
@@ -196,8 +198,8 @@ public enum MarkdownParser {
             // ATX heading
             if trimmed.hasPrefix("#") {
                 let hashes = trimmed.prefix(while: { $0 == "#" }).count
-                if hashes <= 6, hashes == trimmed.count || trimmed.dropFirst(hashes).first == " " {
-                    var cr = range.lowerBound + (line.count - trimmed.count) + hashes
+                if hashes <= 6, unindented.dropFirst(hashes).first == " " {
+                    var cr = range.lowerBound + leadingWidth + hashes
                     if cr < range.upperBound, ns.character(at: cr) == 0x20 { cr += 1 }
                     var end = range.upperBound
                     while end > cr, ns.character(at: end - 1) == 0x20 { end -= 1 }
@@ -218,7 +220,7 @@ public enum MarkdownParser {
 
             // blockquote
             if trimmed.hasPrefix(">") {
-                var cr = range.lowerBound + (line.count - trimmed.count) + 1
+                var cr = range.lowerBound + leadingWidth + 1
                 if cr < range.upperBound, ns.character(at: cr) == 0x20 { cr += 1 }
                 var end = range.upperBound
                 while end > cr, ns.character(at: end - 1) == 0x20 { end -= 1 }
@@ -372,7 +374,7 @@ public enum MarkdownParser {
         // bullet
         if c == 0x2D || c == 0x2A || c == 0x2B { // - * +
             let next = i + 1
-            if next == range.upperBound || ns.character(at: next) == 0x20 {
+            if next < range.upperBound, ns.character(at: next) == 0x20 {
                 // task list: bullet, space, then [ ] / [x]
                 if let task = matchTaskMarker(ns, at: next + 1, limit: range.upperBound) {
                     return ParsedListItem(
@@ -399,7 +401,7 @@ public enum MarkdownParser {
             if digits > 9 { return nil }
             if j < range.upperBound, ns.character(at: j) == 0x2E || ns.character(at: j) == 0x29 {
                 let after = j + 1
-                if after == range.upperBound || ns.character(at: after) == 0x20 {
+                if after < range.upperBound, ns.character(at: after) == 0x20 {
                     let number = Int(ns.substring(with: i..<j)) ?? 1
                     if let task = matchTaskMarker(ns, at: after + 1, limit: range.upperBound) {
                         return ParsedListItem(

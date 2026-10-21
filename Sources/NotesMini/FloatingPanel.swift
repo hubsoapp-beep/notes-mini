@@ -30,7 +30,8 @@ final class FloatingPanel: NSPanel {
         isFloatingPanel = true
 
         level = WindowLevel.overlay
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        // Join other applications' sets and full-screen Spaces as a floating overlay.
+        collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .fullScreenAuxiliary, .ignoresCycle]
 
         isOpaque = false
         backgroundColor = .clear

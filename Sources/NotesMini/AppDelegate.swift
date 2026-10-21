@@ -58,6 +58,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Finder and Spotlight send a reopen event when this accessory app is already running.
+        // Restore the notes panel even if another window (such as Preferences) is visible.
+        guard panel != nil else { return true }
+        showPanel(nil)
+        return false
+    }
+
     // MARK: store helpers
 
     private var currentNote: Note? { panel?.currentNote }
@@ -238,8 +246,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setUpStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: "Notes Mini")
-        item.button?.image?.isTemplate = true
+        // SF Symbol with an emoji fallback, so the item is never an invisible blank.
+        if let image = NSImage(systemSymbolName: "note.text", accessibilityDescription: "Notes Mini") {
+            item.button?.image = image
+            item.button?.image?.isTemplate = true
+        } else {
+            item.button?.title = "📝"
+        }
         item.button?.action = #selector(statusItemClicked)
         item.button?.target = self
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])

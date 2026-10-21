@@ -129,6 +129,12 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         activateNotesMini()
         // A panel put away in the Dock has to come back from it, not just be ordered front.
         if panel.isMiniaturized { panel.deminiaturize(nil) }
+        // macOS 14+: when the cooperative activation above loses the race (another app is
+        // frontmost and refuses to yield), a canJoinAllSpaces window stays glued to the Space it
+        // was created on — ordered "front" somewhere the user is not looking. Tearing the window
+        // off the screen and re-ordering it forces the window server to re-join the *current*
+        // Space, which is the whole point of showing the panel.
+        panel.orderOut(nil)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         if focus { editorView.focus() }

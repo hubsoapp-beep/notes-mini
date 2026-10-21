@@ -4,10 +4,8 @@ import NotesMiniCore
 /// Owns the editor: raw markdown is the source of truth, the rendered attributed string is what
 /// the user sees and types into, and every change is translated back to raw.
 ///
-/// Raw ⇄ display translation is diff-based: we compare the previous display string with the new
-/// one, get one replaced range, map it back through the renderer's offset table, and apply the
-/// edit to the raw markdown. That keeps hidden markers intact and needs no per-keystroke
-/// knowledge of markdown syntax.
+/// AppKit's replacement range is mapped through the renderer's offset table to edit raw Markdown.
+/// A Unicode-safe diff handles committed IME composition when no single replacement is available.
 final class NoteEditorView: NSView, NSTextViewDelegate {
 
     private let scrollView = NSScrollView()
@@ -18,6 +16,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
     private var render: NoteRender
     private var lastDisplay = ""
     private var isApplying = false
+    private var pendingEdit: (range: NSRange, text: String, selection: NSRange)?
 
     private var undoStack: [(raw: String, selection: NSRange)] = []
     private var redoStack: [(raw: String, selection: NSRange)] = []
@@ -84,12 +83,13 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
     // MARK: loading
 
     func load(_ note: Note, caretAtEnd: Bool = true) {
+        pendingEdit = nil
         self.note = note
         undoStack.removeAll()
         redoStack.removeAll()
         emojiPicker?.dismiss()
-        render = NoteRenderer.render(note.body, theme: Prefs.theme)
         let caret = caretAtEnd ? (note.body as NSString).length : 0
+        render = Self.render(note.body, caretRaw: caret)
         applyRender(caretRaw: caret, length: 0)
     }
 
@@ -98,7 +98,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         guard let note else { return }
         let caret = selectedRawRange.location
         let length = selectedRawRange.length
-        render = NoteRenderer.render(note.body, theme: Prefs.theme)
+        render = Self.render(note.body, caretRaw: caret)
         applyRender(caretRaw: caret, length: length)
     }
 
@@ -110,17 +110,67 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
 
     // MARK: display ⇄ raw
 
+    /// Reveal inline source while editing; completed block prefixes stay rendered.
+    private static func render(_ raw: String, caretRaw: Int) -> NoteRender {
+        NoteRenderer.render(raw, theme: Prefs.theme, revealing: caretRaw)
+    }
+
     private func applyRender(caretRaw: Int, length: Int) {
         isApplying = true
+        defer { isApplying = false }
         let display = render.display
-        editor.textStorage?.setAttributedString(display)
+        if let storage = editor.textStorage {
+            // Keep unchanged glyphs and layout intact. Replacing the whole storage on every
+            // keystroke invalidates every paragraph and makes scrolling and the caret jump.
+            let change = Self.diff(old: storage.string, new: display.string)
+            storage.beginEditing()
+            if change.length > 0 || !change.inserted.isEmpty {
+                storage.replaceCharacters(in: NSRange(location: change.location, length: change.length), with: change.inserted)
+            }
+            display.enumerateAttributes(in: NSRange(location: 0, length: display.length)) { attributes, range, _ in
+                var offset = range.location
+                while offset < NSMaxRange(range) {
+                    var effective = NSRange()
+                    let existing = storage.attributes(at: offset, effectiveRange: &effective)
+                    let span = NSRange(location: offset, length: min(NSMaxRange(effective), NSMaxRange(range)) - offset)
+                    var desired = attributes
+                    // The renderer creates attachment objects, but unchanged checkboxes share
+                    // their cached image. Keep the existing object to avoid invalidating every task.
+                    if let old = existing[.attachment] as? NSTextAttachment,
+                       let new = attributes[.attachment] as? NSTextAttachment,
+                       old.image === new.image, old.bounds == new.bounds {
+                        desired[.attachment] = old
+                    }
+                    if !(existing as NSDictionary).isEqual(to: desired) {
+                        storage.setAttributes(desired, range: span)
+                    }
+                    offset = NSMaxRange(span)
+                }
+            }
+            storage.endEditing()
+        }
         decorationLayout.update(render: render, theme: Prefs.theme)
         let start = render.displayOffsetForCaret(caretRaw)
         let end = render.displayOffsetForCaret(caretRaw + length)
         editor.setSelectedRange(NSRange(location: start, length: max(0, end - start)))
-        editor.typingAttributes = [.font: Prefs.theme.baseFont, .foregroundColor: NSColor.labelColor]
+        var attributes: [NSAttributedString.Key: Any] = [.font: Prefs.theme.baseFont, .foregroundColor: NSColor.labelColor]
+        if let block = render.blocks.first(where: { $0.rawRange.lowerBound <= caretRaw && caretRaw <= $0.rawRange.upperBound }),
+           case .heading(let level) = block.kind {
+            attributes[.font] = Prefs.theme.headingFont(level: level)
+        }
+        editor.typingAttributes = attributes
         lastDisplay = display.string
-        isApplying = false
+    }
+
+    func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange,
+                  replacementString: String?) -> Bool {
+        guard !isApplying, let replacementString else { return true }
+        // AppKit supplies the exact edit. A string diff alone cannot locate an insertion in
+        // repeated text and can split the surrogate pair of an emoji.
+        if !textView.hasMarkedText(), textView.string == lastDisplay {
+            pendingEdit = (affectedCharRange, replacementString, selectedRawRange)
+        }
+        return true
     }
 
     func textDidChange(_ notification: Notification) {
@@ -136,25 +186,54 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
     /// clicking back onto one must bring it up again.
     func textViewDidChangeSelection(_ notification: Notification) {
         guard !isApplying else { return }
+        // A mouse drag is still choosing the selection; swapping the text under it would break
+        // the drag. `MarkdownEditor.mouseDown` calls back once the button is up.
+        guard NSEvent.pressedMouseButtons == 0 else { return }
+        revealCaretBlock()
         refreshEmojiPicker()
+    }
+
+    /// Re-renders when the caret changes blocks, revealing inline source in the active block.
+    func revealCaretBlock() {
+        guard let note, !isApplying, !editor.hasMarkedText(),
+              // Typed text not committed yet: the old render cannot map the new display.
+              editor.string == lastDisplay else { return }
+        let selection = selectedRawRange
+        guard render.revealableRawRange(forCaret: selection.location) != render.revealedRawRange else { return }
+        render = Self.render(note.body, caretRaw: selection.location)
+        applyRender(caretRaw: selection.location, length: selection.length)
+        // Inside a selection change the text view only redraws the caret's line; the block that
+        // just hid its markers would keep showing them.
+        editor.needsDisplay = true
     }
 
     private func commitDisplayChange() {
         guard let note else { return }
         let newDisplay = editor.string
         guard newDisplay != lastDisplay else { return }
-        let (loc, len, inserted) = Self.diff(old: lastDisplay, new: newDisplay)
+        let edit = pendingEdit
+        pendingEdit = nil
+        let exact = edit.flatMap { edit -> (location: Int, length: Int, inserted: String)? in
+            guard NSMaxRange(edit.range) <= lastDisplay.utf16.count,
+                  (lastDisplay as NSString).replacingCharacters(in: edit.range, with: edit.text) == newDisplay else { return nil }
+            return (edit.range.location, edit.range.length, edit.text)
+        }
+        let (loc, len, inserted) = exact ?? Self.diff(old: lastDisplay, new: newDisplay)
 
         let previousRaw = note.body
-        let rawRange = render.rawRange(forDisplayRange: NSRange(location: loc, length: len))
-        let newRaw = (previousRaw as NSString).replacingCharacters(in: rawRange, with: inserted)
+        let rawRange = rawRangeForEdit(NSRange(location: loc, length: len))
+        var newRaw = (previousRaw as NSString).replacingCharacters(in: rawRange, with: inserted)
         guard newRaw != previousRaw else { return }
 
-        pushUndo(raw: previousRaw, selection: selectedRawRange)
-        let caretRaw = rawRange.location + (inserted as NSString).length
+        pushUndo(raw: previousRaw, selection: edit?.selection ?? rawRange)
+        var caretRaw = rawRange.location + (inserted as NSString).length
+        if inserted == "]", let completed = EditorCommands.InputRule.completeTask(raw: newRaw, caret: caretRaw) {
+            newRaw = completed.raw
+            caretRaw = completed.caret
+        }
         note.body = newRaw
         store?.scheduleSave(note)
-        render = NoteRenderer.render(newRaw, theme: Prefs.theme)
+        render = Self.render(newRaw, caretRaw: caretRaw)
         applyRender(caretRaw: caretRaw, length: 0)
         onContentChange?(note)
         refreshEmojiPicker()
@@ -167,9 +246,24 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         let limit = min(o.length, n.length)
         var prefix = 0
         while prefix < limit, o.character(at: prefix) == n.character(at: prefix) { prefix += 1 }
+        if prefix > 0, prefix < o.length {
+            prefix = min(prefix, o.rangeOfComposedCharacterSequence(at: prefix).location)
+        }
+        if prefix > 0, prefix < n.length {
+            prefix = min(prefix, n.rangeOfComposedCharacterSequence(at: prefix).location)
+        }
         var suffix = 0
         while suffix < (limit - prefix),
               o.character(at: o.length - 1 - suffix) == n.character(at: n.length - 1 - suffix) { suffix += 1 }
+        // Do not retain half a composed character as the common suffix.
+        if suffix > 0 {
+            let oldStart = o.length - suffix
+            let newStart = n.length - suffix
+            let oldBoundary = o.rangeOfComposedCharacterSequence(at: oldStart)
+            let newBoundary = n.rangeOfComposedCharacterSequence(at: newStart)
+            if oldBoundary.location < oldStart { suffix -= NSMaxRange(oldBoundary) - oldStart }
+            if newBoundary.location < newStart { suffix = min(suffix, n.length - NSMaxRange(newBoundary)) }
+        }
         let removed = NSRange(location: prefix, length: o.length - prefix - suffix)
         let inserted = n.substring(with: NSRange(location: prefix, length: n.length - prefix - suffix))
         return (removed.location, removed.length, inserted)
@@ -179,7 +273,14 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
 
     /// The current display selection mapped into raw markdown offsets.
     var selectedRawRange: NSRange {
-        render.rawRange(forDisplayRange: editor.selectedRange())
+        rawRangeForEdit(editor.selectedRange())
+    }
+
+    private func rawRangeForEdit(_ range: NSRange) -> NSRange {
+        if range.location == 0, range.length > 0, range.length == render.displayLength {
+            return NSRange(location: 0, length: render.rawLength)
+        }
+        return render.rawRange(forDisplayRange: range)
     }
 
     private func selectionAnchorRaw() -> Int {
@@ -214,7 +315,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         guard let note else { return }
         note.body = raw
         store?.scheduleSave(note)
-        render = NoteRenderer.render(raw, theme: Prefs.theme)
+        render = Self.render(raw, caretRaw: selection.location)
         applyRender(caretRaw: selection.location, length: selection.length)
         onContentChange?(note)
     }
@@ -228,7 +329,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         pushUndo(raw: note.body, selection: selectedRawRange)
         note.body = newRaw
         store?.scheduleSave(note)
-        render = NoteRenderer.render(newRaw, theme: Prefs.theme)
+        render = Self.render(newRaw, caretRaw: caretRaw)
         applyRender(caretRaw: caretRaw, length: length)
         onContentChange?(note)
         refreshEmojiPicker()
@@ -371,11 +472,27 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
 
     /// Return inside a list continues it; on an empty item it leaves the list.
     func handleReturn() -> Bool {
-        guard let note else { return false }
+        guard let note, editor.selectedRange().length == 0 else { return false }
         let caret = selectedRawRange.location
         guard let result = EditorCommands.InputRule.continuation(raw: note.body, caret: caret) else { return false }
         applyReplace(result.raw, caretRaw: result.caret)
         return true
+    }
+
+    /// Backspace at the beginning of rendered content removes its block prefix first.
+    func handleBackspace() -> Bool {
+        guard let note, editor.selectedRange().length == 0 else { return false }
+        let caret = selectedRawRange.location
+        guard let block = MarkdownParser.parse(note.body).first(where: {
+            $0.contentRange.lowerBound == caret && $0.rawRange.lowerBound < caret
+        }) else { return false }
+        switch block.kind {
+        case .heading, .listItem, .blockquote:
+            let range = NSRange(location: block.rawRange.lowerBound, length: caret - block.rawRange.lowerBound)
+            applyReplace((note.body as NSString).replacingCharacters(in: range, with: ""), caretRaw: range.location)
+            return true
+        default: return false
+        }
     }
 
     // MARK: checkboxes
@@ -389,7 +506,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         note.body = newRaw
         store?.scheduleSave(note)
         let caret = selectedRawRange.location
-        render = NoteRenderer.render(newRaw, theme: Prefs.theme)
+        render = Self.render(newRaw, caretRaw: caret)
         applyRender(caretRaw: caret, length: 0)
         onContentChange?(note)
         return true

@@ -95,7 +95,7 @@ public enum EditorCommands {
 
         // splice back
         let start = idx.range(ofLine: first).lowerBound
-        let end = (last + 1 < idx.count) ? idx.starts[last + 1] : ns.length
+        let end = idx.range(ofLine: last).upperBound
         return (ns.substring(to: start) + out.joined(separator: "\n") + ns.substring(from: end))
     }
 
@@ -227,8 +227,8 @@ public enum EditorCommands {
             if ["-", "*", "+"].contains(lineBeforeSpace) {
                 return lineBeforeSpace + " "
             }
-            if lineBeforeSpace == "[]" { return "[ ] " }
-            if lineBeforeSpace == "[]" || lineBeforeSpace == "[x]" { return lineBeforeSpace + " " }
+            if lineBeforeSpace == "[]" || lineBeforeSpace == "[ ]" { return "- [ ] " }
+            if lineBeforeSpace == "[x]" { return "- [x] " }
             if lineBeforeSpace.range(of: "^\\d+[.)]$", options: .regularExpression) != nil {
                 return lineBeforeSpace + " "
             }
@@ -243,51 +243,45 @@ public enum EditorCommands {
             return "--- "
         }
 
+        /// A closing bracket completes a task shortcut at the start of a line. Keep the saved
+        /// form standard Markdown and leave the caret after its required content separator.
+        public static func completeTask(raw: String, caret: Int) -> (raw: String, caret: Int)? {
+            let ns = raw as NSString
+            guard caret > 0, caret <= ns.length else { return nil }
+            let index = LineIndex(raw)
+            let range = index.range(ofLine: index.line(of: caret))
+            let prefix = ns.substring(with: range.lowerBound..<caret)
+            let indent = String(prefix.prefix { $0 == " " || $0 == "\t" })
+            let marker = String(prefix.dropFirst(indent.count))
+            guard marker.range(of: "^(?:[-*+] )?\\[(?: |[xX])?\\]$", options: .regularExpression) != nil,
+                  !MarkdownParser.parse(raw).contains(where: {
+                      if case .codeBlock = $0.kind { return $0.rawRange.contains(caret - 1) }
+                      return false
+                  }) else { return nil }
+            let checked = marker.lowercased().contains("[x]")
+            let normalized = indent + (checked ? "- [x] " : "- [ ] ")
+            let suffix = ns.substring(from: caret)
+            let tail = suffix.hasPrefix(" ") ? String(suffix.dropFirst()) : suffix
+            return (ns.substring(to: range.lowerBound) + normalized + tail,
+                    range.lowerBound + normalized.utf16.count)
+        }
+
         /// Return key inside a list item: continue the list. Return on an empty item: drop the marker.
         public static func continuation(raw: String, caret: Int) -> (raw: String, caret: Int)? {
             let ns = raw as NSString
-            let idx = LineIndex(raw)
-            let lineIndex = idx.line(of: caret)
-            let lineRange = idx.range(ofLine: lineIndex)
-            let line = ns.substring(with: lineRange)
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let caret = min(max(0, caret), ns.length)
+            guard let block = MarkdownParser.parse(raw).first(where: {
+                      $0.rawRange.lowerBound <= caret && caret <= $0.rawRange.upperBound
+                  }), case .listItem(let item) = block.kind,
+                  caret >= block.contentRange.lowerBound else { return nil }
+            let line = ns.substring(with: block.rawRange)
             let indent = String(line.prefix { $0 == " " || $0 == "\t" })
-            let insertAt = maxRange(lineRange)
-
-            // empty list item -> leave the list
-            if trimmed.isEmpty || trimmed == "-" || trimmed == "*" || trimmed == "+" || trimmed == ">" || trimmed == "[]" || trimmed == "[ ]" {
-                if trimmed.isEmpty {
-                    return nil
-                }
-                let newLine = indent.isEmpty ? "" : indent
-                return (ns.substring(to: lineRange.lowerBound) + newLine + ns.substring(from: insertAt), lineRange.lowerBound + newLine.utf16.count)
+            if block.contentRange.isEmpty {
+                return (ns.replacingCharacters(in: NSRange(block.rawRange), with: ""), block.rawRange.lowerBound)
             }
-
-            let current = detectKind(line)
-            guard let kind = current else { return nil }
-
-            switch kind {
-            case .bulletList, .taskList, .orderedList:
-                let marker: String
-                switch kind {
-                case .orderedList:
-                    let n = Int(trimmed.prefix(while: { $0.isNumber })) ?? 1
-                    marker = "\(n + 1). "
-                case .taskList:
-                    marker = "- [ ] "
-                default:
-                    marker = "- "
-                }
-                let insertion = "\n" + indent + marker
-                return (ns.substring(to: insertAt) + insertion + ns.substring(from: insertAt), insertAt + insertion.utf16.count)
-            case .codeBlock:
-                if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                    return nil // closing fence: plain new line
-                }
-                return (ns.substring(to: insertAt) + "\n" + ns.substring(from: insertAt), insertAt + 1)
-            default:
-                return nil
-            }
+            let marker = item.task != nil ? "- [ ] " : (item.ordered ? "\(item.index + 1). " : "- ")
+            let insertion = "\n" + indent + marker
+            return (ns.substring(to: caret) + insertion + ns.substring(from: caret), caret + insertion.utf16.count)
         }
 
         /// Tab inside a list item increases nesting, Shift-Tab decreases it.

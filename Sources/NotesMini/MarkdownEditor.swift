@@ -101,6 +101,11 @@ final class MarkdownEditor: NSTextView {
         paste(sender)
     }
 
+    override func deleteBackward(_ sender: Any?) {
+        if !hasMarkedText(), host?.handleBackspace() == true { return }
+        super.deleteBackward(sender)
+    }
+
     // MARK: checkbox clicks
 
     override func mouseDown(with event: NSEvent) {
@@ -114,20 +119,24 @@ final class MarkdownEditor: NSTextView {
                                               fractionOfDistanceBetweenInsertionPoints: nil)
             let length = (string as NSString).length
             for candidate in [index, index - 1] where candidate >= 0 && candidate < length {
-                if attributedString().attribute(.attachment, at: candidate, effectiveRange: nil) != nil,
+                let glyphs = layout.glyphRange(forCharacterRange: NSRange(location: candidate, length: 1), actualCharacterRange: nil)
+                if layout.boundingRect(forGlyphRange: glyphs, in: container).contains(inContainer),
+                   attributedString().attribute(.attachment, at: candidate, effectiveRange: nil) != nil,
                    host.toggleCheckbox(atDisplayOffset: candidate) {
                     return
                 }
             }
         }
         super.mouseDown(with: event)
+        // `super` tracks the drag until the button is released; only now is the caret settled.
+        host?.revealCaretBlock()
     }
 
     /// The caret has no business inside an attachment; nudge it to the nearest text position.
     override func setSelectedRange(_ charRange: NSRange, affinity: NSSelectionAffinity, stillSelecting: Bool) {
         var range = charRange
         let length = (string as NSString).length
-        if length > 0, range.location < length,
+        if range.length == 0, length > 0, range.location < length,
            attributedString().attribute(.attachment, at: range.location, effectiveRange: nil) != nil {
             range = NSRange(location: min(length, range.location + 1), length: 0)
         }

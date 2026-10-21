@@ -175,6 +175,41 @@ func testRenderer() {
     let hr = NoteRenderer.render(headingRaw)
     eq((headingRaw as NSString).substring(to: hr.rawOffsetForCaret(0)), "# ", "caret at line start is after marker")
 
+    // The block under the caret shows its source, so a typed marker or space never vanishes.
+    let typedHeading = "text\n\n## "
+    let th = NoteRenderer.render(typedHeading, revealing: (typedHeading as NSString).length)
+    eq(th.display.string, "text\n\n", "space activates heading and hides its prefix")
+    eq(NoteRenderer.render("##", revealing: 2).display.string, "##", "incomplete heading remains visible")
+    eq(th.displayOffsetForCaret((typedHeading as NSString).length), th.displayLength, "caret after revealed marker")
+    let typedSpace = "word "
+    let ts = NoteRenderer.render(typedSpace, revealing: 5)
+    eq(ts.display.string, "word ", "revealed trailing space is visible")
+    let mixed = "# Title\n\nSome **bold** `x`\n\n- [ ] task **a**\n"
+    let boldLine = (mixed as NSString).range(of: "Some").location
+    let mx = NoteRenderer.render(mixed, revealing: boldLine).display.string
+    check(mx.contains("Some **bold** `x`"), "revealed paragraph shows inline markers")
+    check(!mx.contains("# Title"), "other blocks keep markers hidden")
+    let taskLine = (mixed as NSString).range(of: "task").location
+    let tx = NoteRenderer.render(mixed, revealing: taskLine).display.string
+    check(tx.contains("task **a**") && !tx.contains("[ ]"), "revealed task keeps its checkbox")
+    check(tx.contains("task **a**") && !tx.contains("Some **"), "reveal follows the caret")
+    let revealFence = "a\n\n```\ncode\n```\n"
+    let fx = NoteRenderer.render(revealFence, revealing: (revealFence as NSString).range(of: "code").location)
+    eq(fx.display.string, revealFence, "revealed code block shows its fences")
+    // `from` is where the source starts: a list item's bullet stays rendered, only its text is source.
+    for (text, caret, from) in [(mixed, boldLine, boldLine), (mixed, taskLine, taskLine),
+                                (revealFence, 6, 3), (typedHeading, 9, 9)] {
+        let r = NoteRenderer.render(text, revealing: caret)
+        var bad = ""
+        for rawOffset in from..<(r.revealedRawRange?.upperBound ?? from) {
+            let back = r.rawOffsetForCaret(r.displayOffsetForCaret(rawOffset))
+            if back != rawOffset { bad = "raw \(rawOffset) -> \(back)"; break }
+        }
+        check(r.revealedRawRange != nil && bad.isEmpty, "revealed block maps one-to-one: \(bad)")
+        eq(text.components(separatedBy: "\n").count, r.display.string.components(separatedBy: "\n").count,
+           "reveal keeps the line count")
+    }
+
     let empty = NoteRenderer.render("")
     eq(empty.displayLength, 0, "empty display length")
     eq(empty.rawLength, 0, "empty raw length")
@@ -429,6 +464,8 @@ func testEditorCommands() {
     eq(EditorCommands.insertLink("", selection: NSRange(location: 0, length: 0), url: "https://x.com"), "[https://x.com](https://x.com)", "link with no selection")
 
     eq(EditorCommands.applyBlock("plain line", lineIndex: 0, kind: .heading1), "# plain line", "heading 1 applied")
+    eq(EditorCommands.applyBlock("first\nsecond", lineIndex: 0, kind: .heading2), "## first\nsecond", "heading preserves next line")
+    eq(EditorCommands.applyBlock("first\n", lineIndex: 0, kind: .heading2), "## first\n", "heading preserves final newline")
     eq(EditorCommands.applyBlock("# plain line", lineIndex: 0, kind: .heading1), "plain line", "heading 1 toggled off")
     eq(EditorCommands.applyBlock("### deep", lineIndex: 0, kind: .heading1), "# deep", "heading 1 replaces heading 3")
     eq(EditorCommands.applyBlock("text", lineIndex: 0, kind: .blockquote), "> text", "blockquote applied")
@@ -452,7 +489,7 @@ func testEditorCommands() {
     eq(EditorCommands.InputRule.normalize(lineBeforeSpace: "#"), "# ", "space after # normalizes heading")
     eq(EditorCommands.InputRule.normalize(lineBeforeSpace: "###"), "### ", "space after ### normalizes heading")
     eq(EditorCommands.InputRule.normalize(lineBeforeSpace: "-"), "- ", "space after - normalizes bullet")
-    eq(EditorCommands.InputRule.normalize(lineBeforeSpace: "[]"), "[ ] ", "task marker normalized")
+    eq(EditorCommands.InputRule.normalize(lineBeforeSpace: "[]"), "- [ ] ", "task marker normalized")
     eq(EditorCommands.InputRule.normalize(lineBeforeSpace: "1."), "1. ", "space after 1. normalizes ordered list")
     eq(EditorCommands.InputRule.normalize(lineBeforeSpace: ">"), "> ", "space after > normalizes quote")
     eq(EditorCommands.InputRule.normalize(lineBeforeSpace: "```"), "``` ", "space after fence normalizes")
@@ -469,6 +506,18 @@ func testEditorCommands() {
     let exitList = EditorCommands.InputRule.continuation(raw: "- ", caret: 2)
     eq(exitList?.raw, "", "return on empty item leaves the list")
     check(EditorCommands.InputRule.continuation(raw: "plain text", caret: 10) == nil, "return in paragraph does nothing special")
+    eq(EditorCommands.InputRule.continuation(raw: "- abcdef", caret: 5)?.raw, "- abc\n- def", "list splits at caret")
+    eq(EditorCommands.InputRule.continuation(raw: "- [ ] ", caret: 6)?.raw, "", "empty task exits list")
+    eq(EditorCommands.InputRule.continuation(raw: "2. ", caret: 3)?.raw, "", "empty ordered item exits list")
+    check(EditorCommands.InputRule.continuation(raw: "```\n- item\n```", caret: 10) == nil, "list continuation disabled in code")
+    check(EditorCommands.InputRule.continuation(raw: "text [ ] here", caret: 13) == nil, "inline brackets are not a task list")
+    for marker in ["[]", "[ ]", "- []", "- [ ]", "+ []", "* [ ]"] {
+        eq(EditorCommands.InputRule.completeTask(raw: marker, caret: marker.utf16.count)?.raw, "- [ ] ", "complete task: \(marker)")
+    }
+    eq(EditorCommands.InputRule.completeTask(raw: "  []", caret: 4)?.raw, "  - [ ] ", "task keeps indentation")
+    eq(EditorCommands.InputRule.completeTask(raw: "[x]", caret: 3)?.raw, "- [x] ", "checked task normalizes")
+    check(EditorCommands.InputRule.completeTask(raw: "text []", caret: 7) == nil, "inline brackets stay literal")
+    check(EditorCommands.InputRule.completeTask(raw: "```\n[]", caret: 6) == nil, "code brackets stay literal")
 
     eq(EditorCommands.InputRule.changeIndent(raw: "- item", caret: 3, increase: true), "  - item", "tab indents list item")
     eq(EditorCommands.InputRule.changeIndent(raw: "  - item", caret: 5, increase: false), "- item", "shift-tab outdents list item")

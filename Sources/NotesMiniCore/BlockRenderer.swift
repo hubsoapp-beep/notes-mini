@@ -98,6 +98,8 @@ public final class NoteRender {
     public let blocks: [BlockRenderInfo]
     public let decorations: [Decoration]
     public let theme: RenderTheme
+    /// Raw range of the block shown as source (markers visible), if any. See `render(_:theme:revealing:)`.
+    public let revealedRawRange: Range<Int>?
 
     init(raw: String,
          display: NSAttributedString,
@@ -105,7 +107,8 @@ public final class NoteRender {
          rawToDisplay: [Int],
          blocks: [BlockRenderInfo],
          decorations: [Decoration],
-         theme: RenderTheme) {
+         theme: RenderTheme,
+         revealedRawRange: Range<Int>?) {
         self.raw = raw
         self.rawLength = (raw as NSString).length
         self.display = display
@@ -115,6 +118,7 @@ public final class NoteRender {
         self.blocks = blocks
         self.decorations = decorations
         self.theme = theme
+        self.revealedRawRange = revealedRawRange
     }
 
     // MARK: mapping
@@ -160,28 +164,43 @@ public final class NoteRender {
     public func block(containingDisplayOffset offset: Int) -> BlockRenderInfo? {
         blocks.first { NSLocationInRange(offset, $0.displayRange) }
     }
+
+    /// Raw range of the block a caret at `rawOffset` would reveal, or nil on a blank line.
+    /// The end of a line counts as inside it: that is where the caret sits while typing.
+    public func revealableRawRange(forCaret rawOffset: Int) -> Range<Int>? {
+        blocks.first { $0.rawRange.lowerBound <= rawOffset && rawOffset <= $0.rawRange.upperBound }?.rawRange
+    }
 }
 
 // MARK: - Renderer
 
 public enum NoteRenderer {
 
-    public static func render(_ raw: String, theme: RenderTheme = RenderTheme()) -> NoteRender {
+    /// `revealing` is the raw caret offset. The block under it is emitted as source, markers and
+    /// trailing spaces included, so what the person types is what they see; every other block
+    /// hides its markers. Without it every block is rendered.
+    public static func render(_ raw: String, theme: RenderTheme = RenderTheme(), revealing caret: Int? = nil) -> NoteRender {
         let blocks = MarkdownParser.parse(raw)
         let b = Builder(raw: raw, theme: theme)
         var infos: [BlockRenderInfo] = []
         var cursor = 0
+        var revealedRawRange: Range<Int>?
 
         for block in blocks {
             if block.rawRange.lowerBound > cursor {
                 b.emitBlankLines(from: cursor, to: block.rawRange.lowerBound)
             }
             b.beginBlock()
+            let reveal = caret.map { block.rawRange.lowerBound <= $0 && $0 <= block.rawRange.upperBound } ?? false
+            if reveal, revealedRawRange == nil { revealedRawRange = block.rawRange }
+            b.revealing = reveal && revealedRawRange == block.rawRange
             switch block.kind {
             case .heading(let level): b.emitHeading(block, level: level)
-            case .paragraph: b.emitInlines(block.inlines, base: infos.isEmpty ? b.titleAttrs : b.bodyAttrs)
+            case .paragraph:
+                let base = infos.isEmpty ? b.titleAttrs : b.bodyAttrs
+                if b.revealing { b.emitRevealed(block, base: base) } else { b.emitInlines(block.inlines, base: base) }
             case .blockquote:
-                b.emitInlines(block.inlines, base: b.quoteAttrs)
+                if b.revealing { b.emitRevealed(block, base: b.quoteAttrs) } else { b.emitInlines(block.inlines, base: b.quoteAttrs) }
                 // The `>` marker is hidden like every other marker, so the rule that makes a quote
                 // readable has to be painted separately — nothing in the text expresses it.
                 if b.displayLength > b.blockStart {
@@ -220,7 +239,8 @@ public enum NoteRenderer {
                           rawToDisplay: b.rawToDisplay,
                           blocks: infos,
                           decorations: b.decorations,
-                          theme: theme)
+                          theme: theme,
+                          revealedRawRange: revealedRawRange)
     }
 
     // MARK: builder
@@ -238,6 +258,8 @@ public enum NoteRenderer {
 
         var blockStart = 0
         var blockContentEnd = 0
+        /// The current block is the one under the caret: emit its source instead of hiding markers.
+        var revealing = false
 
         var displayLength: Int { out.length }
 
@@ -331,13 +353,82 @@ public enum NoteRenderer {
         }
 
         /// Zero-content placeholder (task checkbox) mapped to a raw offset.
-        func appendAttachment(_ attachment: NSTextAttachment, rawOffset: Int) {
+        func appendAttachment(_ attachment: NSTextAttachment, rawOffset: Int, attrs: [NSAttributedString.Key: Any]) {
             let start = out.length
             let placeholder = String(UnicodeScalar(NSTextAttachment.character)!)
-            out.append(NSAttributedString(string: placeholder, attributes: [.attachment: attachment]))
+            var attributes = attrs
+            attributes[.attachment] = attachment
+            out.append(NSAttributedString(string: placeholder, attributes: attributes))
             while displayToRaw.count < start { displayToRaw.append(rawOffset) }
             displayToRaw.append(max(0, min(rawOffset, max(0, rawLength - 1))))
             if rawOffset >= 0, rawOffset < rawLength, rawToDisplay[rawOffset] < 0 { rawToDisplay[rawOffset] = start }
+        }
+
+        /// Raw source appended one-to-one: every offset maps to itself, markers included.
+        func appendVerbatim(_ text: NSAttributedString, rawStart: Int) {
+            let start = out.length
+            out.append(text)
+            while displayToRaw.count < start { displayToRaw.append(max(0, rawStart)) }
+            for k in 0..<text.length {
+                let rawOff = rawStart + k
+                displayToRaw.append(min(rawOff, max(0, rawLength - 1)))
+                if rawOff < rawLength, rawToDisplay[rawOff] < 0 { rawToDisplay[rawOff] = start + k }
+            }
+        }
+
+        /// The block under the caret, as source: markers in the tertiary colour, content styled as
+        /// usual. `from` skips a prefix that stays rendered (list bullets and checkboxes).
+        func emitRevealed(_ block: Block, base: [NSAttributedString.Key: Any], from: Int? = nil, fontOverride: NSFont? = nil) {
+            let lower = from ?? block.rawRange.lowerBound
+            guard lower < block.rawRange.upperBound else { return }
+            let range = lower..<block.rawRange.upperBound
+            var markerAttrs = base
+            markerAttrs[.foregroundColor] = theme.tertiaryColor
+            let text = NSMutableAttributedString(string: ns.substring(with: range), attributes: markerAttrs)
+            var styled: [(range: Range<Int>, attrs: [NSAttributedString.Key: Any])] = []
+            collectStyles(block.inlines, attrs: base, fontOverride: fontOverride, into: &styled)
+            for (r, a) in styled {
+                let clamped = r.clamped(to: range)
+                guard !clamped.isEmpty else { continue }
+                text.setAttributes(a, range: NSRange(location: clamped.lowerBound - lower, length: clamped.count))
+            }
+            appendVerbatim(text, rawStart: lower)
+        }
+
+        /// The attributes `emitInline` would give each visible leaf, keyed by raw range.
+        func collectStyles(_ nodes: [InlineNode], attrs: [NSAttributedString.Key: Any], fontOverride: NSFont?,
+                           into styled: inout [(range: Range<Int>, attrs: [NSAttributedString.Key: Any])]) {
+            for node in nodes {
+                var a = attrs
+                switch node.kind {
+                case .text:
+                    styled.append((node.rawRange, a))
+                case .strong:
+                    a[.font] = fontOverride?.withTraits(.fontBold) ?? font(from: a).withTraits(.fontBold)
+                    collectStyles(node.children, attrs: a, fontOverride: fontOverride, into: &styled)
+                case .em:
+                    a[.font] = fontOverride?.withTraits(.fontItalic) ?? font(from: a).withTraits(.fontItalic)
+                    collectStyles(node.children, attrs: a, fontOverride: fontOverride, into: &styled)
+                case .strike:
+                    a[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+                    collectStyles(node.children, attrs: a, fontOverride: fontOverride, into: &styled)
+                case .code:
+                    a[.font] = monoFont(from: a)
+                    let fence = max(0, (node.rawRange.count - (node.content as NSString).length) / 2)
+                    styled.append(((node.rawRange.lowerBound + fence)..<(node.rawRange.upperBound - fence), a))
+                case .link, .image:
+                    a[.foregroundColor] = theme.linkColor
+                    a[.underlineStyle] = NSUnderlineStyle.single.rawValue
+                    if let url = node.url, let u = URL(string: url) { a[NSAttributedString.Key.link] = u }
+                    if node.kind == .link, !node.children.isEmpty {
+                        collectStyles(node.children, attrs: a, fontOverride: nil, into: &styled)
+                    } else {
+                        styled.append((node.rawRange, a))
+                    }
+                case .lineBreak:
+                    break
+                }
+            }
         }
 
         func appendNewline(rawOffset: Int) {
@@ -346,9 +437,8 @@ public enum NoteRenderer {
 
         func emitBlankLines(from: Int, to: Int) {
             guard to > from else { return }
-            for i in from..<min(to, rawLength) where ns.character(at: i) == 0x0A {
-                appendNewline(rawOffset: i)
-            }
+            let range = from..<min(to, rawLength)
+            append(ns.substring(with: range), rawStart: from, rawLen: range.count, attrs: bodyAttrs)
         }
 
         // MARK: blocks
@@ -363,7 +453,17 @@ public enum NoteRenderer {
         func finishBlock(_ block: Block) {
             endContent()
             if block.rawRange.upperBound < rawLength {
-                appendNewline(rawOffset: block.rawRange.upperBound)
+                // A paragraph's terminator must share its paragraph style. NSTextStorage
+                // repairs mismatches; emitting body style here made every edit restyle all
+                // heading and list terminators, invalidating the entire intervening layout.
+                var attrs = bodyAttrs
+                if out.length > blockStart {
+                    attrs[.paragraphStyle] = out.attribute(.paragraphStyle, at: blockStart, effectiveRange: nil)
+                } else if case .heading(let level) = block.kind {
+                    attrs[.paragraphStyle] = headingStyle(level: level)
+                    attrs[.font] = theme.headingFont(level: level)
+                }
+                append("\n", rawStart: block.rawRange.upperBound, rawLen: 1, attrs: attrs)
             }
         }
 
@@ -371,7 +471,11 @@ public enum NoteRenderer {
             skip(block.rawRange.lowerBound..<block.contentRange.lowerBound)
             let font = theme.headingFont(level: level)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: theme.textColor, .paragraphStyle: headingStyle(level: level)]
-            emitInlines(block.inlines, base: attrs, fontOverride: font)
+            if revealing {
+                emitRevealed(block, base: attrs, from: block.contentRange.lowerBound, fontOverride: font)
+            } else {
+                emitInlines(block.inlines, base: attrs, fontOverride: font)
+            }
             endContent()
         }
 
@@ -388,6 +492,10 @@ public enum NoteRenderer {
         }
 
         func emitCodeBlock(_ block: Block) {
+            if revealing {
+                emitRevealedCodeBlock(block)
+                return
+            }
             // The fence lines themselves are hidden, but each of them still owns a line break,
             // so the display keeps the same line numbering as the source.
             skip(block.rawRange.lowerBound..<block.contentRange.lowerBound)
@@ -435,7 +543,32 @@ public enum NoteRenderer {
             }
         }
 
+        /// Fences visible and dimmed, code as usual, the slab around the code lines only.
+        func emitRevealedCodeBlock(_ block: Block) {
+            let range = block.rawRange
+            guard !range.isEmpty else { return }
+            var fenceAttrs = codeAttrs
+            fenceAttrs[.foregroundColor] = theme.tertiaryColor
+            let text = NSMutableAttributedString(string: ns.substring(with: range), attributes: fenceAttrs)
+            let content = block.contentRange.clamped(to: range)
+            if !content.isEmpty {
+                text.setAttributes(codeAttrs, range: NSRange(location: content.lowerBound - range.lowerBound, length: content.count))
+            }
+            let start = out.length
+            appendVerbatim(text, rawStart: range.lowerBound)
+            endContent()
+            if !content.isEmpty {
+                decorations.append(Decoration(kind: .codeBlock,
+                                              range: NSRange(location: start + content.lowerBound - range.lowerBound, length: content.count)))
+            }
+        }
+
         func emitHorizontalRule(_ block: Block) {
+            if revealing {
+                emitRevealed(block, base: bodyAttrs)
+                endContent()
+                return
+            }
             skip(block.rawRange.lowerBound..<block.rawRange.upperBound)
             endContent()
             decorations.append(Decoration(kind: .horizontalRule, range: NSRange(location: blockStart, length: max(1, blockContentEnd - blockStart))))
@@ -456,14 +589,19 @@ public enum NoteRenderer {
                 let att = NSTextAttachment()
                 att.image = CheckboxImages.image(checked: task == .checked, size: theme.fontSize)
                 att.bounds = CGRect(x: 0, y: -1.5, width: theme.fontSize, height: theme.fontSize)
-                appendAttachment(att, rawOffset: block.taskMarkerRange?.lowerBound ?? block.contentRange.lowerBound)
+                appendAttachment(att, rawOffset: block.taskMarkerRange?.lowerBound ?? block.contentRange.lowerBound, attrs: prefixAttrs)
                 append(" ", rawStart: block.contentRange.lowerBound, rawLen: 1, attrs: prefixAttrs)
             } else if item.ordered {
                 append("\(item.index). ", rawStart: block.rawRange.lowerBound, rawLen: 1, attrs: prefixAttrs)
             } else {
                 append("•  ", rawStart: block.rawRange.lowerBound, rawLen: 1, attrs: prefixAttrs)
             }
-            emitInlines(block.inlines, base: contentAttrs)
+            if revealing {
+                // The bullet or checkbox stays rendered; only the item's own text shows its source.
+                emitRevealed(block, base: contentAttrs, from: block.contentRange.lowerBound)
+            } else {
+                emitInlines(block.inlines, base: contentAttrs)
+            }
             endContent()
         }
 
