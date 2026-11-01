@@ -119,7 +119,21 @@ final class MarkdownEditor: NSTextView {
 
     /// Paste always lands as plain markdown, never as styled RTF/HTML.
     override func paste(_ sender: Any?) {
-        let text = NSPasteboard.general.string(forType: .string) ?? ""
+        let pb = NSPasteboard.general
+        if let image = NSImage(pasteboard: pb), let note = host?.note {
+            let dir = note.url.deletingLastPathComponent().appendingPathComponent("attachments", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let name = "img-\(Int(Date().timeIntervalSince1970)).png"
+            let url = dir.appendingPathComponent(name)
+            if let tiff = image.tiffRepresentation,
+               let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: url)
+                insertText("![](attachments/\(name))", replacementRange: selectedRange())
+                return
+            }
+        }
+        let text = pb.string(forType: .string) ?? ""
         guard !text.isEmpty else { return }
         insertText(text, replacementRange: selectedRange())
     }
