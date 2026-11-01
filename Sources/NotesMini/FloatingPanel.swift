@@ -39,7 +39,7 @@ final class FloatingPanel: NSPanel {
         isMovableByWindowBackground = true
         hidesOnDeactivate = false
         becomesKeyOnlyIfNeeded = false
-        animationBehavior = .utilityWindow
+        animationBehavior = .none
         isReleasedWhenClosed = false
         // No title bar chrome, but keep the standard behaviours that matter for typing.
         isRestorable = false

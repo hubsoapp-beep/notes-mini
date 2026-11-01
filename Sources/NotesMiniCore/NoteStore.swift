@@ -29,6 +29,8 @@ public final class NoteStore {
     private var pendingNotes: [URL: Note] = [:]
     private var pendingSaves: [URL: DispatchWorkItem] = [:]
     private let saveDelay: DispatchTimeInterval = .milliseconds(450)
+    private let maxSaveDelay: DispatchTimeInterval = .seconds(4)
+    private var maxSaveWorkItem: DispatchWorkItem?
     private let queue = DispatchQueue(label: "notesmini.store", qos: .utility)
     private var lastSelfWriteTimestamps: [URL: Date] = [:]
     private var suppressUntil: [URL: Date] = [:]
@@ -184,6 +186,16 @@ public final class NoteStore {
         }
         pendingSaves[url] = item
         queue.asyncAfter(deadline: .now() + saveDelay, execute: item)
+        // Max age: never let a dirty buffer sit unsaved longer than maxSaveDelay.
+        if maxSaveWorkItem == nil {
+            let maxItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.flushAll()
+                self.maxSaveWorkItem = nil
+            }
+            maxSaveWorkItem = maxItem
+            queue.asyncAfter(deadline: .now() + maxSaveDelay, execute: maxItem)
+        }
     }
 
     public func flush(_ note: Note) {
@@ -193,10 +205,14 @@ public final class NoteStore {
 
     /// Writes only the notes that are actually waiting to be saved.
     public func flushAll() {
+        maxSaveWorkItem?.cancel()
+        maxSaveWorkItem = nil
         for note in pendingNotes.values { flush(note) }
     }
 
     public var hasPendingSaves: Bool { !pendingNotes.isEmpty }
+
+    public func isPending(_ note: Note) -> Bool { pendingNotes[note.url] === note }
 
     /// Drops the pending entries for one note. Keyed by URL normally, but a note that gets renamed
     /// while a write is in flight would otherwise leave an unreachable entry behind, so match on

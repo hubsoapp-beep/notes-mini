@@ -44,7 +44,7 @@ final class MarkdownEditor: NSTextView {
         editor.isContinuousSpellCheckingEnabled = false
         editor.isGrammarCheckingEnabled = false
         editor.smartInsertDeleteEnabled = false
-        editor.usesFindPanel = false
+        editor.usesFindPanel = true
         editor.usesRuler = false
         editor.importsGraphics = false
 
@@ -83,6 +83,33 @@ final class MarkdownEditor: NSTextView {
             break
         }
         super.keyDown(with: event)
+    }
+
+    // MARK: drag & drop
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil) { return .copy }
+        if sender.draggingPasteboard.canReadObject(forClasses: [NSString.self], options: nil) { return .copy }
+        return []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], !urls.isEmpty {
+            for url in urls {
+                if ["md", "markdown"].contains(url.pathExtension.lowercased()) {
+                    host?.onOpenNoteURL?(url)
+                    return true
+                }
+            }
+            // Insert links for other files.
+            let links = urls.map { "[\($0.lastPathComponent)](\($0.absoluteString))" }.joined(separator: " ")
+            insertText(links, replacementRange: selectedRange())
+            return true
+        }
+        if let str = sender.draggingPasteboard.string(forType: .string) {
+            insertText(str, replacementRange: selectedRange())
+            return true
+        }
+        return false
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

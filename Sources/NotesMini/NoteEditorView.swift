@@ -26,6 +26,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
     var onContentChange: ((Note) -> Void)?
     var onEscape: (() -> Void)?
     var onFocusLost: (() -> Void)?
+    var onOpenNoteURL: ((URL) -> Void)?
 
     /// Lazily built: most sessions never type `:`, and a second window is not free.
     private var emojiPicker: EmojiPickerPanel?
@@ -153,6 +154,7 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         let start = render.displayOffsetForCaret(caretRaw)
         let end = render.displayOffsetForCaret(caretRaw + length)
         editor.setSelectedRange(NSRange(location: start, length: max(0, end - start)))
+        editor.scrollRangeToVisible(editor.selectedRange())
         var attributes: [NSAttributedString.Key: Any] = [.font: Prefs.theme.baseFont, .foregroundColor: NSColor.labelColor]
         if let block = render.blocks.first(where: { $0.rawRange.lowerBound <= caretRaw && caretRaw <= $0.rawRange.upperBound }),
            case .heading(let level) = block.kind {

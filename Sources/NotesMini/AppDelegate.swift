@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: NotesPanelController!
     private var statusItem: NSStatusItem?
     private var prefsWindow: PreferencesWindowController?
+    private var hotkeyFailed = false
 
     // MARK: lifecycle
 
@@ -160,6 +161,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.panel.dismissOverlay()
                 self.trashNote(nil)
             })
+            if !store.trashedNotes().isEmpty {
+                items.append(OverlayItem(title: "Przywróć z kosza", symbol: "arrow.uturn.backward") { [weak self] in
+                    guard let self else { return }
+                    self.panel.dismissOverlay()
+                    self.showTrashRestore()
+                })
+            }
         }
         items.append(OverlayItem(title: "Ustawienia…", symbol: "gearshape", accessory: "⌘,") { [weak self] in
             self?.panel.dismissOverlay()
@@ -193,6 +201,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.show(store.createNote())
         }
         refreshStatusMenu()
+    }
+
+    private func showTrashRestore() {
+        let items = store.trashedNotes().map { url in
+            OverlayItem(title: url.lastPathComponent, symbol: "doc.text") { [weak self] in
+                guard let self else { return }
+                if let note = self.store.restore(fromTrash: url) {
+                    self.panel.dismissOverlay()
+                    self.panel.show(note)
+                    self.refreshStatusMenu()
+                }
+            }
+        }
+        panel.presentOverlay(items: items, placeholder: "Szukaj w koszu…", emptyText: "Kosz pusty")
     }
 
     @objc func exportMarkdown(_ sender: Any?) { export(as: .markdown) }
@@ -265,15 +287,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// launch at a file that no longer exists.
     private func storeDidChange() {
         refreshStatusMenu()
-        if let note = currentNote, Prefs.lastNotePath != note.url.path {
-            Prefs.lastNotePath = note.url.path
+        if let note = currentNote {
+            if Prefs.lastNotePath != note.url.path { Prefs.lastNotePath = note.url.path }
+            // External edits (e.g. Obsidian) overwrite only when the local buffer is clean.
+            if !store.isPending(note),
+               let fresh = store.note(withURL: note.url) ?? store.loadNote(at: note.url),
+               fresh.body != panel.currentNote?.body {
+                // Compare against what the editor actually shows.
+                if fresh.body != editorText() {
+                    panel.show(fresh)
+                }
+            }
         }
+    }
+
+    private func editorText() -> String {
+        panel.currentEditorText()
     }
 
     private func refreshStatusMenu() {
         guard let item = statusItem else { return }
         let menu = NSMenu()
-        let show = NSMenuItem(title: "Pokaż notatnik (\(HotkeyCenter.display(Prefs.hotkey)))", action: #selector(showPanel(_:)), keyEquivalent: "")
+        let showTitle = hotkeyFailed ? "Pokaż notatnik (skrót zajęty)" : "Pokaż notatnik (\(HotkeyCenter.display(Prefs.hotkey)))"
+        let show = NSMenuItem(title: showTitle, action: #selector(showPanel(_:)), keyEquivalent: "")
         show.target = self
         menu.addItem(show)
 
@@ -331,8 +367,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let ok = HotkeyCenter.shared.register(spec) { [weak self] in
             self?.togglePanel(nil)
         }
+        hotkeyFailed = !ok
         if !ok {
             NSLog("[NotesMini] nie udało się zarejestrować skrótu \(spec)")
+            refreshStatusMenu()
         }
     }
 

@@ -115,6 +115,10 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
             self?.resizeToFitContent()
         }
         editorView.store = store
+        editorView.onOpenNoteURL = { [weak self] url in
+            guard let self else { return }
+            if let note = self.store.loadNote(at: url) { self.show(note) }
+        }
     }
 
     // MARK: content
@@ -144,6 +148,8 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         DispatchQueue.main.async { [weak self] in self?.resizeToFitContent() }
         Prefs.lastNotePath = note.url.path
     }
+
+    func currentEditorText() -> String { editorView.currentRaw }
 
     func hide() {
         guard panel.isVisible else { return }
