@@ -11,7 +11,11 @@ import NotesMiniCore
 /// answered by an engine that still held the old number. Reporting the size we already have leaves
 /// nothing to negotiate and nothing to fight, so the edges drag like any other window.
 final class PanelContentView: NSView {
-    override var fittingSize: NSSize { bounds.size }
+    /// The window's own size is the only thing that decides how tall/wide the panel is. Reporting
+    /// the current bounds here made the Auto Layout engine hold a stale number and fight live
+    /// resizes (shrinks snapped back, especially with tall content). Reporting no opinion lets the
+    /// edges drag like any other window while the card still fills whatever size it gets.
+    override var fittingSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric) }
 }
 
 /// The floating notes window: a rounded card with a small header and the editor underneath.
@@ -68,6 +72,11 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
             card.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             card.topAnchor.constraint(equalTo: content.topAnchor),
             card.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            // Keep the engine from narrowing the window to fit the note list's preferred width
+            // (the original 430 -> 188 collapse). fittingSize reports no opinion, so this floor
+            // is what stops it.
+            content.widthAnchor.constraint(greaterThanOrEqualToConstant: minWidth),
+            content.heightAnchor.constraint(greaterThanOrEqualToConstant: minHeight),
         ])
 
         header.translatesAutoresizingMaskIntoConstraints = false
@@ -145,7 +154,10 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         resizeToFitContent()
         // Text layout needs a real width before the content height means anything, so measure
         // again once AppKit has run the layout pass it was just handed.
-        DispatchQueue.main.async { [weak self] in self?.resizeToFitContent() }
+        DispatchQueue.main.async { [weak self] in
+            self?.resizeToFitContent()
+            self?.editorView.editor.scrollRangeToVisible(self?.editorView.editor.selectedRange() ?? NSRange())
+        }
         Prefs.lastNotePath = note.url.path
     }
 
