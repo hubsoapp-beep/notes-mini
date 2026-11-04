@@ -39,10 +39,10 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     var onRequestNewNote: (() -> Void)?
     var onRequestPreferences: (() -> Void)?
 
-    private let minWidth: CGFloat = 360
-    private let defaultWidth: CGFloat = 430
+    private let minWidth: CGFloat = 320
+    private let defaultWidth: CGFloat = 380
     private let minHeight: CGFloat = 240
-    private let maxHeight: CGFloat = 640
+    private let maxHeight: CGFloat = 900
     private let headerHeight: CGFloat = 38
     private let footerHeight: CGFloat = 24
 
@@ -306,13 +306,14 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         clampIntoVisibleScreen()
     }
 
+    /// First run: a narrow tall column docked to the left edge, Raycast-like.
     private func positionNearTopCentre() {
         guard let screen = NSScreen.main else { return }
         let visible = screen.visibleFrame
-        let size = NSSize(width: defaultWidth, height: 300)
+        let size = NSSize(width: defaultWidth, height: min(visible.height - 60, 760))
         let origin = NSPoint(
-            x: visible.midX - size.width / 2,
-            y: visible.maxY - size.height - 90 // slightly below the menu bar, Raycast-like
+            x: visible.minX + 24,
+            y: visible.maxY - size.height - 12
         )
         panel.setFrame(NSRect(origin: origin, size: size), display: false)
     }

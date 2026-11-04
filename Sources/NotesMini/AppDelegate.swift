@@ -22,7 +22,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store = NoteStore(folder: folder)
         store.reload()
         store.startWatching()
-        store.onChange = { [weak self] in self?.storeDidChange() }
+        store.onChange = { [weak self] in
+            // The save queue fires this from a background thread; UI work here would crash
+            // on the main-queue assertion. On main it stays synchronous so a change made
+            // during termination is not lost to an async hop that never runs.
+            if Thread.isMainThread { self?.storeDidChange() }
+            else { DispatchQueue.main.async { self?.storeDidChange() } }
+        }
 
         panel = NotesPanelController(store: store)
         panel.onRequestNewNote = { [weak self] in self?.newNote(nil) }
