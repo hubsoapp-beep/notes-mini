@@ -13,6 +13,14 @@ public enum StoreError: LocalizedError {
 }
 
 /// Notes as files in a single folder. One markdown file per note, frontmatter for metadata.
+///
+/// Confined to the main thread: saves are debounced on the main queue and the folder watcher reports
+/// there too, so the editor and the store can never see each other half way through a change.
+/// Files are small and written atomically, so this costs no perceptible time.
+///
+/// There is exactly one `Note` object per file for as long as the file exists. The editor holds that
+/// object and types into it, and a reload updates it in place. A reload that built fresh objects left
+/// the store holding a stale copy of the open note, which then replaced the text being typed.
 public final class NoteStore {
 
     public private(set) var folder: URL
@@ -22,48 +30,114 @@ public final class NoteStore {
     /// Called after any mutation of the note list or of a note's content.
     public var onChange: (() -> Void)?
 
-    private var watcher: DispatchSourceFileSystemObject?
-    private var watchedFD: CInt = -1
-    /// Notes with a save in flight, keyed by URL. Only these are written by `flushAll()`: a note
-    /// the user never touched must stay byte-identical on disk, frontmatter and all.
-    private var pendingNotes: [URL: Note] = [:]
-    private var pendingSaves: [URL: DispatchWorkItem] = [:]
-    private let saveDelay: DispatchTimeInterval = .milliseconds(450)
-    private let maxSaveDelay: DispatchTimeInterval = .seconds(4)
-    private var maxSaveWorkItem: DispatchWorkItem?
-    private let queue = DispatchQueue(label: "notesmini.store", qos: .utility)
-    private var lastSelfWriteTimestamps: [URL: Date] = [:]
-    private var suppressUntil: [URL: Date] = [:]
+    /// Called when someone else changed the file of a note with no unsaved edits. The note already
+    /// holds the new text by then; whoever displays it has to redraw.
+    public var onExternalChange: ((Note) -> Void)?
 
-    public init(folder: URL) {
+    /// Called when a save failed. The edit stays pending and is retried.
+    public var onSaveFailure: ((Note, String) -> Void)?
+
+    private var watcher: DispatchSourceFileSystemObject?
+    private var pendingReload: DispatchWorkItem?
+
+    /// A note waiting to be saved. Only these are written by `flushAll()`: a note the user never
+    /// touched must stay byte-identical on disk, frontmatter and all. Keyed by identity because a
+    /// save can rename the file, and a key built from the path would then stop matching.
+    private struct PendingSave {
+        let note: Note
+        let firstEdit: Date
+        var work: DispatchWorkItem
+    }
+    private var pending: [ObjectIdentifier: PendingSave] = [:]
+
+    private let saveDelay: DispatchTimeInterval
+    private let maxSaveDelay: DispatchTimeInterval
+    private static let retryDelay: DispatchTimeInterval = .seconds(2)
+    private static let reloadDelay: DispatchTimeInterval = .milliseconds(250)
+
+    /// What the file of each note held the last time this store read or wrote it, by path. A file
+    /// that differs from this was changed by someone else.
+    private var lastKnownContents: [String: Data] = [:]
+
+    public init(folder: URL,
+                saveDelay: DispatchTimeInterval = .milliseconds(450),
+                maxSaveDelay: DispatchTimeInterval = .seconds(4)) {
         // Standardised so that a note's URL compares equal however the path was spelled: on macOS
         // `/var` and `/private/var` are the same directory but different strings, and the store
         // compares URLs to find notes.
         self.folder = folder.resolvingSymlinksInPath()
+        self.saveDelay = saveDelay
+        self.maxSaveDelay = maxSaveDelay
         try? FileManager.default.createDirectory(at: self.folder, withIntermediateDirectories: true)
     }
 
     // MARK: loading
 
+    /// Brings the list in line with the folder, keeping every known note's object.
     @discardableResult
     public func reload() -> [Note] {
         let fm = FileManager.default
+        var known: [String: Note] = [:]
+        for note in notes { known[note.url.path] = note }
         var result: [Note] = []
-        if let entries = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) {
-            for url in entries where url.pathExtension.lowercased() == "md" || url.pathExtension.lowercased() == "markdown" {
-                if let note = loadNote(at: url) { result.append(note) }
+        var seen = Set<String>()
+        let entries = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        for url in entries where Self.isNoteFile(url) {
+            let path = folder.appendingPathComponent(url.lastPathComponent).path
+            guard let data = try? Data(contentsOf: url) else {
+                // Unreadable right now, perhaps mid-write. Dropping a known note here would make it
+                // vanish from the list for one reload.
+                if let note = known[path] { result.append(note); seen.insert(path) }
+                continue
             }
+            if let note = known[path] {
+                refresh(note, from: data)
+                result.append(note)
+            } else if let note = Self.parse(data, url: folder.appendingPathComponent(url.lastPathComponent)) {
+                result.append(note)
+            }
+            lastKnownContents[path] = data
+            seen.insert(path)
         }
+        // A note whose file is gone stays listed while it has edits waiting: the save recreates it.
+        for note in notes where !seen.contains(note.url.path) && isPending(note) { result.append(note) }
+        lastKnownContents = lastKnownContents.filter { seen.contains($0.key) }
         notes = sorted(result)
         onChange?()
         return notes
     }
 
+    /// Takes in the file's current contents if someone else changed them.
+    private func refresh(_ note: Note, from data: Data) {
+        let path = note.url.path
+        guard let last = lastKnownContents[path] else { return }
+        guard last != data else { return }
+        if isPending(note) {
+            keepConflictCopy(of: data, for: note)
+            return
+        }
+        guard let text = String(data: data, encoding: .utf8) else { return }
+        let (meta, body) = Frontmatter.parse(text)
+        note.meta = meta
+        note.body = body
+        onExternalChange?(note)
+    }
+
+    private static func isNoteFile(_ url: URL) -> Bool {
+        ["md", "markdown"].contains(url.pathExtension.lowercased())
+    }
+
+    private static func parse(_ data: Data, url: URL) -> Note? {
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        let (meta, body) = Frontmatter.parse(text)
+        return Note(url: url, meta: meta, body: body)
+    }
+
     public func loadNote(at url: URL) -> Note? {
-        guard let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) else { return nil }
-        let (fm, body) = Frontmatter.parse(text)
-        return Note(url: url, meta: fm, body: body)
+        if let listed = note(withURL: url) { return listed }
+        guard let data = try? Data(contentsOf: url), let note = Self.parse(data, url: url) else { return nil }
+        lastKnownContents[url.path] = data
+        return note
     }
 
     private func sorted(_ list: [Note]) -> [Note] {
@@ -73,7 +147,9 @@ public final class NoteStore {
         }
     }
 
-    public func note(withURL url: URL) -> Note? { notes.first { $0.url == url } }
+    /// By path: two `URL`s for one file need not compare equal, and a directory listing and
+    /// `appendingPathComponent` do not always produce the same spelling.
+    public func note(withURL url: URL) -> Note? { notes.first { $0.url.path == url.path } }
 
     // MARK: create / delete
 
@@ -83,9 +159,8 @@ public final class NoteStore {
         meta.title = title.isEmpty ? nil : title
         let note = Note(url: folder.appendingPathComponent(placeholderName(for: now)), meta: meta, body: body)
         note.move(to: uniqueURL(slug: Slug.make(title.isEmpty ? "note" : title)))
-        writeNow(note)
         notes.insert(note, at: 0)
-        onChange?()
+        writeNow(note)
         return note
     }
 
@@ -119,11 +194,15 @@ public final class NoteStore {
     @discardableResult
     public func trash(_ note: Note) -> URL? {
         let fm = FileManager.default
+        // Save first: the words typed just before trashing belong in the trash too. It also takes
+        // the note off the pending list, so no late save can bring the file back.
+        if isPending(note) { flush(note) }
         try? fm.createDirectory(at: trashFolder, withIntermediateDirectories: true)
         let stamp = Self.timestamp()
         let dest = trashFolder.appendingPathComponent("\(stamp)-\(note.url.lastPathComponent)")
         do {
             if fm.fileExists(atPath: note.url.path) { try fm.moveItem(at: note.url, to: dest) }
+            lastKnownContents[note.url.path] = nil
             notes.removeAll { $0 === note }
             onChange?()
             return dest
@@ -155,10 +234,8 @@ public final class NoteStore {
         }
         do {
             try fm.moveItem(at: url, to: dest)
-            let note = loadNote(at: dest)
             reload()
-            onChange?()
-            return note
+            return note(withURL: dest)
         } catch { return nil }
     }
 
@@ -176,89 +253,123 @@ public final class NoteStore {
 
     // MARK: saving
 
+    /// Saves once typing pauses, and in any case before an edit gets older than `maxSaveDelay`.
     public func scheduleSave(_ note: Note) {
-        let url = note.url
-        pendingNotes[url] = note
-        pendingSaves[url]?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.writeNow(note)
-        }
-        pendingSaves[url] = item
-        queue.asyncAfter(deadline: .now() + saveDelay, execute: item)
-        // Max age: never let a dirty buffer sit unsaved longer than maxSaveDelay.
-        if maxSaveWorkItem == nil {
-            let maxItem = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                self.flushAll()
-                self.maxSaveWorkItem = nil
-            }
-            maxSaveWorkItem = maxItem
-            queue.asyncAfter(deadline: .now() + maxSaveDelay, execute: maxItem)
+        let id = ObjectIdentifier(note)
+        let firstEdit = pending[id]?.firstEdit ?? Date()
+        pending[id]?.work.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.writeNow(note) }
+        pending[id] = PendingSave(note: note, firstEdit: firstEdit, work: work)
+        let budget = Self.seconds(maxSaveDelay) - Date().timeIntervalSince(firstEdit)
+        let delay = max(0, min(Self.seconds(saveDelay), budget))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private static func seconds(_ interval: DispatchTimeInterval) -> TimeInterval {
+        switch interval {
+        case .seconds(let v): return TimeInterval(v)
+        case .milliseconds(let v): return TimeInterval(v) / 1_000
+        case .microseconds(let v): return TimeInterval(v) / 1_000_000
+        case .nanoseconds(let v): return TimeInterval(v) / 1_000_000_000
+        default: return 0
         }
     }
 
     public func flush(_ note: Note) {
-        clearPending(note)
         writeNow(note)
     }
 
     /// Writes only the notes that are actually waiting to be saved.
     public func flushAll() {
-        maxSaveWorkItem?.cancel()
-        maxSaveWorkItem = nil
-        for note in pendingNotes.values { flush(note) }
+        for entry in pending.values { writeNow(entry.note) }
     }
 
-    public var hasPendingSaves: Bool { !pendingNotes.isEmpty }
+    public var hasPendingSaves: Bool { !pending.isEmpty }
 
-    public func isPending(_ note: Note) -> Bool { pendingNotes[note.url] === note }
+    public func isPending(_ note: Note) -> Bool { pending[ObjectIdentifier(note)] != nil }
 
-    /// Drops the pending entries for one note. Keyed by URL normally, but a note that gets renamed
-    /// while a write is in flight would otherwise leave an unreachable entry behind, so match on
-    /// the instance as well.
     private func clearPending(_ note: Note) {
-        pendingSaves[note.url]?.cancel()
-        pendingNotes = pendingNotes.filter { $0.value !== note }
-        pendingSaves = pendingSaves.filter { note.url != $0.key }
+        pending.removeValue(forKey: ObjectIdentifier(note))?.work.cancel()
     }
 
     public func writeNow(_ note: Note) {
         let fm = FileManager.default
-
-        note.meta.updated = Date()
-        if note.meta.created == nil { note.meta.created = note.meta.updated }
-        let data = Data(note.fileContents().utf8)
         clearPending(note)
 
         // Writing a file whose contents would not change is pure noise: it bumps the modification
         // date, wakes the watcher and makes the note jump to the top of a "recently updated" list.
-        if let existing = try? Data(contentsOf: note.url), existing == data {
+        // Compared before `updated` moves, which would otherwise make every save look like a change.
+        let onDisk = try? Data(contentsOf: note.url)
+        if let onDisk, onDisk == Data(note.fileContents().utf8) {
+            lastKnownContents[note.url.path] = onDisk
             return
         }
 
+        // Whatever is in the file now is about to be replaced. If it is not what this store last
+        // saw, it is someone else's work that nothing has picked up yet.
+        if let onDisk, let last = lastKnownContents[note.url.path], last != onDisk {
+            keepConflictCopy(of: onDisk, for: note)
+        }
+
+        note.meta.updated = Date()
+        if note.meta.created == nil { note.meta.created = note.meta.updated }
+        let data = Data(note.fileContents().utf8)
+        let originalURL = note.url
+        let inNotesFolder = note.url.deletingLastPathComponent().path == folder.path
+
         // The filename follows the title, so a note stays findable by name in Finder or Obsidian.
         // A note with no title yet keeps its placeholder name rather than becoming `note.md`.
+        // Files opened from elsewhere stay where they are and keep their names.
         let stem = note.url.deletingPathExtension().lastPathComponent
         let slug = Slug.make(note.title)
-        if !slug.isEmpty, slug != "note", slug != stem {
+        if inNotesFolder, !slug.isEmpty, slug != "note", slug != stem {
             let desired = uniqueURL(slug: slug, excluding: note.url)
             if desired.lastPathComponent != note.url.lastPathComponent,
                fm.fileExists(atPath: note.url.path),
                (try? fm.moveItem(at: note.url, to: desired)) != nil {
                 note.move(to: desired)
-                suppressUntil[desired] = Date().addingTimeInterval(1.5)
             }
         }
 
         do {
             try data.write(to: note.url, options: .atomic)
-            suppressUntil[note.url] = Date().addingTimeInterval(1.2)
-            pendingNotes[note.url] = nil
+            lastKnownContents[originalURL.path] = nil
+            lastKnownContents[note.url.path] = data
+            // Re-listed here for a note whose file disappeared while it was open.
+            if inNotesFolder, !notes.contains(where: { $0 === note }) { notes.append(note) }
             notes = sorted(notes)
             onChange?()
         } catch {
-            onChange?()
+            NSLog("[NotesMini] save failed for %@: %@", note.url.path, String(describing: error))
+            retrySave(note)
+            onSaveFailure?(note, error.localizedDescription)
+        }
+    }
+
+    /// A failed save must not forget the edit: the folder may simply be on a disk that came back.
+    private func retrySave(_ note: Note) {
+        let work = DispatchWorkItem { [weak self] in self?.writeNow(note) }
+        pending[ObjectIdentifier(note)] = PendingSave(note: note, firstEdit: Date(), work: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.retryDelay, execute: work)
+    }
+
+    /// Keeps someone else's version of a note next to it, instead of overwriting it.
+    private func keepConflictCopy(of data: Data, for note: Note) {
+        let stem = note.url.deletingPathExtension().lastPathComponent
+        let directory = note.url.deletingLastPathComponent()
+        let base = "\(stem) (konflikt \(Self.timestamp()))"
+        var copy = directory.appendingPathComponent("\(base).md")
+        var n = 2
+        while FileManager.default.fileExists(atPath: copy.path) {
+            copy = directory.appendingPathComponent("\(base) \(n).md")
+            n += 1
+        }
+        do {
+            try data.write(to: copy, options: .atomic)
+            // Treated as seen: the next reload lists the copy as a note of its own.
+            lastKnownContents[note.url.path] = data
+        } catch {
+            NSLog("[NotesMini] could not keep conflict copy at %@: %@", copy.path, String(describing: error))
         }
     }
 
@@ -269,43 +380,47 @@ public final class NoteStore {
 
     // MARK: watcher
 
+    /// Watches the folder's entries. Atomic saves show up here, which covers most editors; a program
+    /// that writes into an existing file does not, which is why the app reloads whenever the panel
+    /// takes focus and why `writeNow` checks the file again before replacing it.
     public func startWatching() {
         stopWatching()
-        let fm = FileManager.default
         let fd = open(folder.path, O_EVTONLY)
-        guard fd >= 0 else { return }
-        watchedFD = fd
-        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: queue)
-        src.setEventHandler { [weak self] in
-            guard let self else { return }
-            // ignore the writes we caused ourselves
-            let now = Date()
-            let relevant = self.suppressUntil.filter { $0.value > now }.keys
-            self.suppressUntil = self.suppressUntil.filter { $0.value > now }
-            _ = relevant
-            self.queue.asyncAfter(deadline: .now() + .milliseconds(350)) { [weak self] in
-                guard let self else { return }
-                DispatchQueue.main.async {
-                    self.reload()
-                }
-            }
+        guard fd >= 0 else {
+            NSLog("[NotesMini] cannot watch %@", folder.path)
+            return
         }
-        src.setCancelHandler { close(fd) }
-        src.resume()
-        watcher = src
-        _ = fm
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
+        source.setEventHandler { [weak self] in self?.scheduleReload() }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        watcher = source
+    }
+
+    /// Coalesces a burst of folder events into one reload.
+    private func scheduleReload() {
+        pendingReload?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.reload() }
+        pendingReload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.reloadDelay, execute: work)
     }
 
     public func stopWatching() {
+        pendingReload?.cancel()
+        pendingReload = nil
         watcher?.cancel()
         watcher = nil
-        watchedFD = -1
     }
 
     public func changeFolder(_ newFolder: URL) {
+        let resolved = newFolder.resolvingSymlinksInPath()
+        guard resolved.path != folder.path else { return }
+        flushAll()
         stopWatching()
-        folder = newFolder
-        try? FileManager.default.createDirectory(at: newFolder, withIntermediateDirectories: true)
+        folder = resolved
+        notes = []
+        lastKnownContents = [:]
+        try? FileManager.default.createDirectory(at: resolved, withIntermediateDirectories: true)
         reload()
         startWatching()
     }

@@ -41,9 +41,13 @@ enum Prefs {
         set { defaults.set(newValue, forKey: Key.lastNote) }
     }
 
-    /// Carbon-style shortcut string, e.g. `opt+n`.
+    /// The default leaves ⌥ alone with a letter: that combination is how a Polish keyboard types
+    /// `ń`, and a global hotkey takes it away from every app, this editor included.
+    static let defaultHotkey = "ctrl+opt+n"
+
+    /// Carbon-style shortcut string, e.g. `ctrl+opt+n`.
     static var hotkey: String {
-        get { defaults.string(forKey: Key.hotkey) ?? "opt+n" }
+        get { defaults.string(forKey: Key.hotkey) ?? defaultHotkey }
         set { defaults.set(newValue, forKey: Key.hotkey) }
     }
 
@@ -54,11 +58,11 @@ enum Prefs {
 
     /// Whether the panel height follows the note.
     ///
-    /// Off by default: the panel is a fixed narrow column and the note scrolls inside it. Resizing
-    /// the window on every keystroke made the glyphs flicker (transparent window composites
-    /// everything on each `setFrame`).
+    /// Turned off the first time the window is resized by hand: from then on the size the person
+    /// chose is the size they get, and the note scrolls inside it instead of dragging the window
+    /// back to its own height.
     static var autoHeight: Bool {
-        get { defaults.object(forKey: Key.autoHeight) as? Bool ?? false }
+        get { defaults.object(forKey: Key.autoHeight) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.autoHeight) }
     }
 

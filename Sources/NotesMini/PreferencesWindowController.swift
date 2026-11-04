@@ -67,7 +67,7 @@ final class PreferencesWindowController: NSWindowController {
         let hotkeyTitle = NSTextField(labelWithString: "Skrót globalny")
         hotkeyTitle.font = .systemFont(ofSize: 11, weight: .medium)
         hotkeyTitle.textColor = .secondaryLabelColor
-        hotkeyField.placeholderString = "opt+n"
+        hotkeyField.placeholderString = Prefs.defaultHotkey
         hotkeyField.target = self
         hotkeyField.action = #selector(hotkeyChanged)
         hotkeyHint.textColor = .tertiaryLabelColor

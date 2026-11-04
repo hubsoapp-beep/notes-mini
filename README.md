@@ -26,7 +26,7 @@ assembles the `.app`.
 - **Resizable, with real window chrome**: traffic lights, edge resizing, and a green button that
   fills the screen edge to edge and hides itself while it does.
 - **Menu bar item**, **launch at login**, **trash folder** instead of deletion.
-- **Glass-ish surface** built from the system's own materials.
+- **Flat, opaque surface**: `#232426` in dark mode, so text reads the same over any window.
 
 ## Requirements
 
@@ -42,7 +42,8 @@ Scripts/build.sh --install  # also copies it to /Applications and launches it
 ```
 
 The app is an accessory app with no Dock icon. Launching or reopening it shows the notes panel.
-It also lives in the menu bar and on the global hotkey, `⌥N` by default.
+It also lives in the menu bar and on the global hotkey, `⌃⌥N` by default (`⌥N` alone would take
+`ń` away from Polish keyboards in every app).
 
 ## Checks
 
@@ -53,17 +54,19 @@ executable target:
 swift run NotesMiniChecks
 swift run -c release NotesMiniChecks
 bash Scripts/check-editor.sh release # real NSTextView input, undo, IME, and layout checks
+bash Scripts/check-e2e.sh release    # the running app: real keystrokes and window drags
 ```
 
 It covers the note model and file format, the Markdown parser and the renderer's raw/display
 mapping, the store (dirty tracking, renames, trash), the emoji catalogue and trigger, and the
-performance budgets for large documents.
+performance budgets for large documents. The end-to-end script needs the Accessibility permission for
+your terminal, briefly borrows the mouse, and runs against a temporary folder.
 
 ## Shortcuts
 
 | | |
 |---|---|
-| `⌥N` | show / hide the panel |
+| `⌃⌥N` | show / hide the panel |
 | `⌘N` | new note |
 | `⌘P` | browse and search notes |
 | `⌘K` | actions (pin, export, copy, reveal, trash, settings) |
@@ -91,6 +94,8 @@ Anything Markdown, plus `- [ ]` / `- [x]` tasks.
 ```
 
 The file name follows the note's first line; a note without a title stays `note.md` until it has one.
+A file changed by another program reloads into the editor. If the note also has unsaved edits, your
+text stays and the other version is kept next to it as `name (konflikt <date>).md`.
 Deleted notes go to `.trash/` inside the notes folder.
 
 ## How it is put together

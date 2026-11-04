@@ -39,10 +39,10 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     var onRequestNewNote: (() -> Void)?
     var onRequestPreferences: (() -> Void)?
 
-    private let minWidth: CGFloat = 320
-    private let defaultWidth: CGFloat = 380
+    private let minWidth: CGFloat = 360
+    private let defaultWidth: CGFloat = 430
     private let minHeight: CGFloat = 240
-    private let maxHeight: CGFloat = 900
+    private let maxHeight: CGFloat = 640
     private let headerHeight: CGFloat = 38
     private let footerHeight: CGFloat = 24
 
@@ -132,11 +132,18 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
     // MARK: content
 
+    /// Puts `note` in the editor and makes sure the panel is in front.
+    ///
+    /// Opening a note in a panel that is already up is not a window event. The frame, the full-screen
+    /// state and the window order all stay as they are: restoring the saved frame here is what threw
+    /// away a resize still waiting for its debounced save.
     func show(_ note: Note, focus: Bool = true) {
-        editorView.load(note)
+        // The same note again (hotkey, Dock, menu bar) keeps its caret and its undo history.
+        if editorView.note !== note { editorView.load(note) }
         header.title = note.uiTitle
         footer.characterCount = note.body.count
-        restoreFrameIfNeeded()
+        let wasVisible = panel.isVisible
+        if !wasVisible { restoreFrameIfNeeded() }
         panel.appearance = Prefs.nsAppearance
         dismissOverlay()
         activateNotesMini()
@@ -147,9 +154,11 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         // was created on — ordered "front" somewhere the user is not looking. Tearing the window
         // off the screen and re-ordering it forces the window server to re-join the *current*
         // Space, which is the whole point of showing the panel.
-        panel.orderOut(nil)
-        panel.makeKeyAndOrderFront(nil)
-        panel.orderFrontRegardless()
+        if !panel.isKeyWindow {
+            panel.orderOut(nil)
+            panel.makeKeyAndOrderFront(nil)
+            panel.orderFrontRegardless()
+        }
         if focus { editorView.focus() }
         resizeToFitContent()
         // Text layout needs a real width before the content height means anything, so measure
@@ -159,6 +168,12 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
             self?.editorView.editor.scrollRangeToVisible(self?.editorView.editor.selectedRange() ?? NSRange())
         }
         Prefs.lastNotePath = note.url.path
+    }
+
+    /// Says so in the header until the next edit: the text is still safe in the editor and the save
+    /// is being retried, but the person should not walk away believing it is on disk.
+    func showSaveFailure(_ reason: String) {
+        header.title = "⚠︎ Nie zapisano: \(reason)"
     }
 
     func currentEditorText() -> String { editorView.currentRaw }
@@ -203,6 +218,12 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         if expandedFrom != nil { leaveFullScreen() } else { enterFullScreen() }
     }
 
+    private func forgetFullScreen() {
+        expandedFrom = nil
+        setTrafficLightsHidden(false)
+        card.cornerRadius = CardBackgroundView.defaultCornerRadius
+    }
+
     private func enterFullScreen() {
         guard let screen = panel.screen ?? NSScreen.main else { return }
         expandedFrom = panel.frame
@@ -218,9 +239,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
     private func leaveFullScreen() {
         guard let previous = expandedFrom else { return }
-        expandedFrom = nil
-        setTrafficLightsHidden(false)
-        card.cornerRadius = CardBackgroundView.defaultCornerRadius
+        forgetFullScreen()
         adjustingFrame = true
         panel.setFrame(previous, display: true)
         adjustingFrame = false
@@ -289,6 +308,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     func dismissOverlay() {
         guard overlay.superview != nil, !overlay.isHidden else { return }
         overlay.isHidden = true
+        overlay.clear()
         editorView.focus()
         resizeToFitContent()
     }
@@ -296,8 +316,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     // MARK: geometry
 
     private func restoreFrameIfNeeded() {
-        expandedFrom = nil
-        setTrafficLightsHidden(false)
+        forgetFullScreen()
         if let saved = Prefs.panelFrame {
             panel.setFrame(saved, display: false)
         } else {
@@ -306,14 +325,13 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         clampIntoVisibleScreen()
     }
 
-    /// First run: a narrow tall column docked to the left edge, Raycast-like.
     private func positionNearTopCentre() {
         guard let screen = NSScreen.main else { return }
         let visible = screen.visibleFrame
-        let size = NSSize(width: defaultWidth, height: min(visible.height - 60, 760))
+        let size = NSSize(width: defaultWidth, height: 300)
         let origin = NSPoint(
-            x: visible.minX + 24,
-            y: visible.maxY - size.height - 12
+            x: visible.midX - size.width / 2,
+            y: visible.maxY - size.height - 90 // slightly below the menu bar, Raycast-like
         )
         panel.setFrame(NSRect(origin: origin, size: size), display: false)
     }
@@ -338,7 +356,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
     /// Only while the height is still the note's to decide: after a manual resize the size the
     /// person chose wins, and a longer note scrolls instead of pushing the window around.
     private func resizeToFitContent() {
-        guard panel.isVisible, autoHeight, expandedFrom == nil else { return }
+        guard panel.isVisible, autoHeight, expandedFrom == nil, !panel.inLiveResize else { return }
         panel.layoutIfNeeded()
         let desired = editorView.usedContentHeight + headerHeight + footerHeight
         let target = min(max(desired.rounded(.up), minHeight), maxHeight)
@@ -358,13 +376,16 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
         store.flushAll()
     }
 
+    /// Coming back is when to look at the folder: a program that writes into an existing file does
+    /// not wake the folder watcher, so this is the first chance to notice what it did.
+    func windowDidBecomeKey(_ notification: Notification) {
+        store.reload()
+    }
+
     func windowDidMove(_ notification: Notification) {
         // Dragging a full-screen panel is a way out of full screen: the person has taken the window
         // somewhere, so the chrome comes back and the window stays where they dropped it.
-        if expandedFrom != nil, !adjustingFrame {
-            expandedFrom = nil
-            setTrafficLightsHidden(false)
-        }
+        if expandedFrom != nil, !adjustingFrame { forgetFullScreen() }
         scheduleFrameSave()
     }
 
@@ -374,8 +395,7 @@ final class NotesPanelController: NSObject, NSWindowDelegate {
 
     /// A finished drag is a decision: this is the size from now on.
     func windowDidEndLiveResize(_ notification: Notification) {
-        expandedFrom = nil
-        setTrafficLightsHidden(false)
+        forgetFullScreen()
         if autoHeight {
             autoHeight = false
             Prefs.autoHeight = false

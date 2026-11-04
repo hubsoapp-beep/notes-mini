@@ -42,6 +42,11 @@ final class OverlayRowView: NSView {
         title.stringValue = item.title
         title.font = .systemFont(ofSize: 13)
         title.lineBreakMode = .byTruncatingTail
+        // A note title can be a whole first paragraph. Auto Layout is one engine for the whole window
+        // and window size loses to the default resistance, so a label that refuses to truncate pushes
+        // the window out to its full text width and then holds it there.
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        title.setContentHuggingPriority(.defaultLow, for: .horizontal)
         title.translatesAutoresizingMaskIntoConstraints = false
 
         accessory.stringValue = item.accessory ?? ""
@@ -185,17 +190,9 @@ final class OverlayView: NSView, NSTextFieldDelegate {
 
     required init?(coder: NSCoder) { nil }
 
-    /// The overlay works as a surface of its own.
-    ///
-    /// The card underneath is deliberately translucent — that is what makes it frosted rather than
-    /// flat — but it is also why the note was reading through the list: the editor text and the
-    /// character count sat behind a 0.90 tint and came out as legible ghosts. A subview cannot blur
-    /// what is behind it, so the only honest answer is to be opaque, using the card's own colour so
-    /// the two surfaces stay the same material. The card's `masksToBounds` rounds the bottom of it
-    /// off for us.
+    /// Covers the note with the card's own colour, so the list reads as the same surface.
     private func applyBackground() {
-        layer?.backgroundColor = CardBackgroundView.tintColor(for: effectiveAppearance)
-            .withAlphaComponent(1).cgColor
+        layer?.backgroundColor = CardBackgroundView.surfaceColor(for: effectiveAppearance).cgColor
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -213,6 +210,14 @@ final class OverlayView: NSView, NSTextFieldDelegate {
         selection = 0
         rebuild()
         window?.makeFirstResponder(field)
+    }
+
+    /// Hidden views keep their constraints, so a closed list must not leave its rows in the layout.
+    func clear() {
+        allItems = []
+        visible = []
+        for row in rows { row.removeFromSuperview() }
+        rows.removeAll()
     }
 
     private func rebuild() {

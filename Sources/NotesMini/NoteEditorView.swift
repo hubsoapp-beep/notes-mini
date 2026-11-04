@@ -103,6 +103,20 @@ final class NoteEditorView: NSView, NSTextViewDelegate {
         applyRender(caretRaw: caret, length: length)
     }
 
+    /// The note's text was replaced from outside the app. Same note, so the caret stays near where it
+    /// was; the undo history described the old text and would now restore unrelated offsets.
+    func noteChangedExternally() {
+        guard let note else { return }
+        if editor.hasMarkedText() { editor.unmarkText() }
+        pendingEdit = nil
+        undoStack.removeAll()
+        redoStack.removeAll()
+        let caret = min(selectedRawRange.location, (note.body as NSString).length)
+        render = Self.render(note.body, caretRaw: caret)
+        applyRender(caretRaw: caret, length: 0)
+        onContentChange?(note)
+    }
+
     func clear() {
         note = nil
         render = NoteRenderer.render("", theme: Prefs.theme)

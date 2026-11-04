@@ -31,6 +31,8 @@ func key(_ text: String, code: UInt16, flags: NSEvent.ModifierFlags = []) {
                                 isARepeat: false, keyCode: code)!
     view.editor.keyDown(with: event)
 }
+let hotkeyParts = Prefs.defaultHotkey.split(separator: "+")
+check(hotkeyParts.count > 2 || hotkeyParts.first != "opt", "default hotkey does not take a Polish letter from the keyboard")
 load()
 key("#", code: 20, flags: .shift)
 key("#", code: 20, flags: .shift)

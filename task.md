@@ -13,7 +13,8 @@ Priorytety: **P0** = ryzyko utraty danych albo aplikacja wyglądająca na zepsut
 
 ### 1. Edycja zewnętrzna nadpisuje zmiany w notatce
 
-- [ ] `storeDidChange()` w `Sources/NotesMini/AppDelegate.swift` odświeża tylko menu bar; otwarta
+- [x] Zrobione: `NoteStore.refresh` / `keepConflictCopy`, checki w `testStoreIntegrity`.
+- `storeDidChange()` w `Sources/NotesMini/AppDelegate.swift` odświeża tylko menu bar; otwarta
       notatka nie jest porównywana z plikiem na dysku.
 - **Skutek:** notatka zmieniona w Obsidianie / innym edytorze przy otwartym panelu zostaje
       nadpisana przy następnym zapisie. Dla notatnika trzymającego dane w plikach to najgorszy
@@ -30,7 +31,8 @@ Priorytety: **P0** = ryzyko utraty danych albo aplikacja wyglądająca na zepsut
 
 ### 2. Bezpiecznik zapisu przy ciągłym pisaniu
 
-- [ ] `NoteStore.saveDelay = .milliseconds(450)` i `scheduleSave` **przesuwa** zapis każdym
+- [x] Zrobione: `scheduleSave` liczy budżet od pierwszej edycji (`maxSaveDelay`).
+- `NoteStore.saveDelay = .milliseconds(450)` i `scheduleSave` **przesuwa** zapis każdym
       znakiem.
 - **Skutek:** 5 minut pisania bez pauzy dłuższej niż pół sekundy = do pliku nie poszło nic
       (do `resignKey` / ukrycia panelu / zamknięcia).
@@ -167,6 +169,14 @@ w repo.
 
 ## Ostatnio zrobione
 
+- tekst kasujący się sam: `NoteStore` działa tylko na głównym wątku i trzyma jeden obiekt `Note` na
+  plik (wcześniej reload budował kopie, a `storeDidChange` z kolejki w tle podmieniał tekst edytora
+  nieaktualną kopią albo wywracał aplikację),
+- blokada rozmiaru okna: długi tytuł w `⌘P` rozpychał panel (580 → 1242) i trzymał go na stałe,
+- `show()` na widocznym panelu nie rusza już ramki, karetki ani historii cofania,
+- domyślny skrót `⌃⌥N`: `⌥N` zabierało `ń` w całym systemie,
+- `Scripts/check-e2e.sh`: testy działającej aplikacji (klawiatura, przeciąganie okna); to częściowo
+  domyka lukę opisaną wyżej w „brak testów UI",
 - przeciąganie panelu za nagłówek (`hitTest` + `performDrag`),
 - nakładki z własnym tłem (`⌘P`, `⌘K`),
 - prawdziwa belka: światła, zmiana rozmiaru z krawędzi, automatyczna wysokość wyłączana ręcznym

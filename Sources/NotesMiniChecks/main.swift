@@ -438,6 +438,205 @@ func testStore() {
     eq(fileText(bystanderURL), bystanderText, "flushAll leaves the other notes alone")
 }
 
+// MARK: - Store: one note, one object, one thread
+
+/// Regressions behind "the text deletes itself": the store used to build a second `Note` for the
+/// same file on every folder reload and reported saves from a background queue, so the app compared
+/// the editor with a stale copy, swapped it in, and either lost the text or crashed.
+func testStoreIntegrity() {
+    func fileText(_ url: URL) -> String {
+        (try? Data(contentsOf: url)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    }
+    func spin(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+    func mdFiles(_ folder: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".md") }
+    }
+
+    // Identity survives a reload, whichever way the note entered the store.
+    let f1 = tempFolder()
+    defer { try? FileManager.default.removeItem(at: f1) }
+    let s1 = NoteStore(folder: f1)
+    let created = s1.createNote(body: "# Stała\n\ntreść\n")
+    s1.reload()
+    check(s1.notes.first === created, "reload keeps the created note's object")
+    check(s1.note(withURL: created.url) === created, "lookup finds the created note after a reload")
+    s1.reload()
+    check(s1.notes.first === created, "a second reload keeps it too")
+    created.body = "# Stała\n\nnowsza treść\n"
+    s1.writeNow(created)
+    s1.reload()
+    eq(created.body, "# Stała\n\nnowsza treść\n", "own write does not revert the note")
+    check(s1.notes.first === created, "own write keeps the object")
+
+    // An edit waiting to be saved is never replaced by the older file.
+    created.body = "# Stała\n\nnapisane przed zapisem\n"
+    s1.scheduleSave(created)
+    s1.reload()
+    eq(created.body, "# Stała\n\nnapisane przed zapisem\n", "reload leaves a dirty buffer alone")
+    check(s1.isPending(created), "reload keeps the edit pending")
+    eq(mdFiles(f1).count, 1, "own older file is not a conflict")
+    s1.flushAll()
+
+    // Saves are delivered on the main thread, with the state already settled.
+    let f2 = tempFolder()
+    defer { try? FileManager.default.removeItem(at: f2) }
+    let s2 = NoteStore(folder: f2, saveDelay: .milliseconds(20), maxSaveDelay: .milliseconds(200))
+    let threaded = s2.createNote(body: "# Wątek\n")
+    var offMain = 0
+    var notified = 0
+    s2.onChange = {
+        notified += 1
+        if !Thread.isMainThread { offMain += 1 }
+    }
+    threaded.body = "# Wątek\n\nzapis\n"
+    s2.scheduleSave(threaded)
+    spin(0.15)
+    check(fileText(threaded.url).contains("zapis"), "debounced save reaches the disk")
+    check(notified > 0, "debounced save reports the change")
+    eq(offMain, 0, "the store reports on the main thread only")
+    check(!s2.hasPendingSaves, "nothing left pending after the save")
+
+    // A renamed note stays pending under its identity, not under its old path.
+    let renaming = s2.createNote(body: "# Stary\n")
+    renaming.body = "# Nowy\n"
+    s2.scheduleSave(renaming)
+    s2.writeNow(renaming)
+    renaming.body = "# Nowy\n\ndalej\n"
+    s2.scheduleSave(renaming)
+    check(s2.isPending(renaming), "pending survives a rename")
+    s2.flushAll()
+    check(fileText(renaming.url).contains("dalej"), "renamed note saves under its new name")
+    eq(mdFiles(f2).filter { $0.hasPrefix("stary") }.count, 0, "old name left nothing behind")
+
+    // Typing without a pause still reaches the disk within the maximum age.
+    let f3 = tempFolder()
+    defer { try? FileManager.default.removeItem(at: f3) }
+    let s3 = NoteStore(folder: f3, saveDelay: .milliseconds(100), maxSaveDelay: .milliseconds(300))
+    let typed = s3.createNote(body: "# Ciągłe\n\n")
+    for index in 0..<30 {
+        typed.body += "\(index) "
+        s3.scheduleSave(typed)
+        spin(0.03)
+    }
+    typed.body += "koniec"
+    s3.scheduleSave(typed)
+    check(s3.hasPendingSaves, "the last keystrokes are still pending")
+    check(fileText(typed.url).contains("5 "), "continuous typing is saved by the maximum age")
+    s3.flushAll()
+    check(fileText(typed.url).contains("koniec"), "flush writes the last keystrokes")
+
+    // Outside edits: a clean note takes them, in place.
+    let f4 = tempFolder()
+    defer { try? FileManager.default.removeItem(at: f4) }
+    let s4 = NoteStore(folder: f4)
+    let shared = s4.createNote(body: "# Wspólna\n\noryginał\n")
+    var external: [Note] = []
+    s4.onExternalChange = { external.append($0) }
+    s4.reload()
+    eq(external.count, 0, "own files are not outside edits")
+    let outside = fileText(shared.url).replacingOccurrences(of: "oryginał", with: "z Obsidiana")
+    try? outside.write(to: shared.url, atomically: true, encoding: .utf8)
+    s4.reload()
+    check(s4.notes.first === shared, "outside edit keeps the object")
+    eq(shared.body, "# Wspólna\n\nz Obsidiana\n", "outside edit reaches a clean note")
+    check(external.first === shared, "outside edit is announced")
+    eq(mdFiles(f4).count, 1, "a clean note makes no conflict copy")
+
+    // A dirty note keeps what was typed, and the outside version is kept next to it.
+    shared.body = "# Wspólna\n\nmoje zmiany\n"
+    s4.scheduleSave(shared)
+    try? outside.replacingOccurrences(of: "z Obsidiana", with: "druga wersja").write(to: shared.url, atomically: true, encoding: .utf8)
+    s4.reload()
+    eq(shared.body, "# Wspólna\n\nmoje zmiany\n", "conflict keeps the local text")
+    let copies = mdFiles(f4).filter { $0.contains("konflikt") }
+    eq(copies.count, 1, "conflict leaves one copy")
+    check(copies.first.map { fileText(f4.appendingPathComponent($0)).contains("druga wersja") } ?? false,
+          "conflict copy holds the outside version")
+    s4.flushAll()
+    check(fileText(shared.url).contains("moje zmiany"), "local text wins the original file")
+
+    // An outside edit the watcher never saw (written in place) is rescued at save time too.
+    let f5 = tempFolder()
+    defer { try? FileManager.default.removeItem(at: f5) }
+    let s5 = NoteStore(folder: f5)
+    let unseen = s5.createNote(body: "# Niewidoczna\n\nstara\n")
+    try? fileText(unseen.url).replacingOccurrences(of: "stara", with: "cudza").write(to: unseen.url, atomically: true, encoding: .utf8)
+    unseen.body = "# Niewidoczna\n\nmoja\n"
+    s5.writeNow(unseen)
+    check(fileText(unseen.url).contains("moja"), "save writes the local text")
+    let rescued = mdFiles(f5).filter { $0.contains("konflikt") }
+    eq(rescued.count, 1, "unseen outside edit is rescued")
+    check(rescued.first.map { fileText(f5.appendingPathComponent($0)).contains("cudza") } ?? false,
+          "rescued copy holds the outside text")
+
+    // Trash: pending text goes along, and nothing brings the file back afterwards.
+    let f6 = tempFolder()
+    defer { try? FileManager.default.removeItem(at: f6) }
+    let s6 = NoteStore(folder: f6, saveDelay: .milliseconds(20), maxSaveDelay: .milliseconds(50))
+    let doomed = s6.createNote(body: "# Kosz\n")
+    doomed.body = "# Kosz\n\nostatnie słowa\n"
+    s6.scheduleSave(doomed)
+    let trashedURL = s6.trash(doomed)
+    spin(0.15)
+    check(trashedURL.map { fileText($0).contains("ostatnie słowa") } ?? false, "trash keeps the pending text")
+    eq(mdFiles(f6).count, 0, "a pending save cannot resurrect a trashed note")
+
+    // Restore hands back the object the store lists.
+    let restored = trashedURL.flatMap { s6.restore(fromTrash: $0) }
+    check(restored != nil && s6.notes.first === restored, "restore returns the listed note")
+
+    // A folder change saves first, and choosing the same folder does nothing at all.
+    let f7 = tempFolder()
+    let f8 = tempFolder()
+    defer {
+        try? FileManager.default.removeItem(at: f7)
+        try? FileManager.default.removeItem(at: f8)
+    }
+    let s7 = NoteStore(folder: f7)
+    let moving = s7.createNote(body: "# Przeprowadzka\n")
+    s7.changeFolder(f7)
+    check(s7.notes.first === moving, "same folder keeps the notes")
+    moving.body = "# Przeprowadzka\n\nniezapisane\n"
+    s7.scheduleSave(moving)
+    s7.changeFolder(f8)
+    check(fileText(f7.appendingPathComponent("przeprowadzka.md")).contains("niezapisane"), "folder change flushes first")
+    eq(s7.notes.count, 0, "new folder lists its own notes")
+    s7.stopWatching()
+
+    // A file opened from elsewhere is saved where it lives, not pulled into the notes folder.
+    let f9 = tempFolder()
+    let elsewhere = tempFolder()
+    defer {
+        try? FileManager.default.removeItem(at: f9)
+        try? FileManager.default.removeItem(at: elsewhere)
+    }
+    let foreignURL = elsewhere.appendingPathComponent("obcy.md")
+    try? "# Obcy\n".write(to: foreignURL, atomically: true, encoding: .utf8)
+    let s9 = NoteStore(folder: f9)
+    if let foreign = s9.loadNote(at: foreignURL) {
+        foreign.body = "# Zupełnie inny\n"
+        s9.writeNow(foreign)
+        eq(foreign.url.path, foreignURL.path, "foreign file keeps its place")
+        check(fileText(foreignURL).contains("Zupełnie inny"), "foreign file is saved in place")
+        eq(s9.notes.count, 0, "foreign file does not join the list")
+    } else {
+        check(false, "foreign file loads")
+    }
+
+    // The watcher sees an outside file on its own, on the main thread.
+    let f10 = tempFolder()
+    defer { try? FileManager.default.removeItem(at: f10) }
+    let s10 = NoteStore(folder: f10)
+    var watcherOffMain = false
+    s10.onChange = { if !Thread.isMainThread { watcherOffMain = true } }
+    s10.startWatching()
+    try? "# Nowy plik\n".write(to: f10.appendingPathComponent("nowy.md"), atomically: true, encoding: .utf8)
+    spin(0.8)
+    s10.stopWatching()
+    eq(s10.notes.count, 1, "watcher picks up a new file")
+    check(!watcherOffMain, "watcher reports on the main thread")
+}
+
 // MARK: - Export
 
 func testExport() {
@@ -608,6 +807,7 @@ testSlug()
 testParser()
 testRenderer()
 testStore()
+testStoreIntegrity()
 testExport()
 testEditorCommands()
 testEmoji()

@@ -22,12 +22,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store = NoteStore(folder: folder)
         store.reload()
         store.startWatching()
-        store.onChange = { [weak self] in
-            // The save queue fires this from a background thread; UI work here would crash
-            // on the main-queue assertion. On main it stays synchronous so a change made
-            // during termination is not lost to an async hop that never runs.
-            if Thread.isMainThread { self?.storeDidChange() }
-            else { DispatchQueue.main.async { self?.storeDidChange() } }
+        store.onChange = { [weak self] in self?.storeDidChange() }
+        store.onExternalChange = { [weak self] note in
+            guard let self, note === self.currentNote else { return }
+            self.panel.editorView.noteChangedExternally()
+        }
+        store.onSaveFailure = { [weak self] note, reason in
+            guard let self, note === self.currentNote else { return }
+            self.panel.showSaveFailure(reason)
         }
 
         panel = NotesPanelController(store: store)
@@ -258,7 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if prefsWindow == nil {
             prefsWindow = PreferencesWindowController(onChange: { [weak self] in
                 guard let self else { return }
-                self.store.changeFolder(Prefs.notesFolder ?? self.store.folder)
+                self.notesFolderMayHaveChanged()
                 self.registerHotkey()
                 self.panel.panel.appearance = Prefs.nsAppearance
                 self.panel.editorView.refreshTheme()
@@ -268,6 +270,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activateNotesMini()
         prefsWindow?.showWindow(nil)
         prefsWindow?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// The open note belongs to the folder it came from. After a switch, show one from the new folder
+    /// instead of quietly carrying on editing a file in the old one.
+    private func notesFolderMayHaveChanged() {
+        let before = store.folder.path
+        store.changeFolder(Prefs.notesFolder ?? store.folder)
+        guard store.folder.path != before else { return }
+        panel.show(store.notes.first ?? store.createNote())
     }
 
     // MARK: status item
@@ -293,22 +304,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// launch at a file that no longer exists.
     private func storeDidChange() {
         refreshStatusMenu()
-        if let note = currentNote {
-            if Prefs.lastNotePath != note.url.path { Prefs.lastNotePath = note.url.path }
-            // External edits (e.g. Obsidian) overwrite only when the local buffer is clean.
-            if !store.isPending(note),
-               let fresh = store.note(withURL: note.url) ?? store.loadNote(at: note.url),
-               fresh.body != panel.currentNote?.body {
-                // Compare against what the editor actually shows.
-                if fresh.body != editorText() {
-                    panel.show(fresh)
-                }
-            }
+        if let note = currentNote, Prefs.lastNotePath != note.url.path {
+            Prefs.lastNotePath = note.url.path
         }
-    }
-
-    private func editorText() -> String {
-        panel.currentEditorText()
     }
 
     private func refreshStatusMenu() {
